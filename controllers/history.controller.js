@@ -1,8 +1,5 @@
 import { prisma } from "../services/prisma.js";
 
-/**
- * GET /api/history - Get playback history
- */
 export async function listHistory(req, res, next) {
   try {
     const limit = parseInt(req.query.limit) || 50;
