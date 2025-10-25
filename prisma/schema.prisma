@@ -1,0 +1,87 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum MediaType {
+  SONG
+  JINGLE
+  SPOT
+}
+
+enum Language {
+  ENGLISH
+  ITALIAN
+  SPANISH
+  OTHER
+}
+
+model Media {
+  id         Int       @id @default(autoincrement())
+  type       MediaType
+  author     String
+  title      String
+  year       Int
+  fileName   String    @unique
+  uploadDate DateTime
+  language   Language  @default(OTHER)
+  bpm        Int?
+  duration   Int
+
+  history       History[]
+  playlistItems PlaylistItem[]
+
+  @@index([type])
+  @@index([language])
+  @@index([year])
+  @@index([uploadDate])
+}
+
+model Playlist {
+  id            Int            @id @default(autoincrement())
+  title         String
+  playlistItems PlaylistItem[]
+  schedules     Schedule[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([title])
+}
+
+model PlaylistItem {
+  id         Int      @id @default(autoincrement())
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  playlistId Int
+  media      Media    @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  mediaId    Int
+  order      Int
+
+  @@unique([playlistId, order])
+  @@index([playlistId])
+  @@index([mediaId])
+}
+
+model Schedule {
+  id         Int      @id @default(autoincrement())
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  playlistId Int
+  datetime   DateTime
+
+  @@index([playlistId])
+  @@index([datetime])
+}
+
+model History {
+  id       Int      @id @default(autoincrement())
+  media    Media    @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  mediaId  Int
+  datetime DateTime @default(now())
+
+  @@index([mediaId])
+  @@index([datetime])
+}
