@@ -4,6 +4,7 @@ import express from "express";
 import casparRoutes from "./routes/caspar.routes.js";
 import historyRoutes from "./routes/history.routes.js";
 import mediaRoutes from "./routes/media.routes.js";
+import playerRoutes from "./routes/player.routes.js";
 import playlistRoutes from "./routes/playlist.routes.js";
 import scheduleRoutes from "./routes/schedule.routes.js";
 dotenv.config();
@@ -44,6 +45,7 @@ app.use("/api/caspar", casparRoutes);
 app.use("/api/playlists", playlistRoutes);
 app.use("/api/schedules", scheduleRoutes);
 app.use("/api/history", historyRoutes);
+app.use("/api/player", playerRoutes);
 
 app.get("/", (req, res) => {
   res.send("API is running...");
