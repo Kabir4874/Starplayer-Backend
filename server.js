@@ -15,6 +15,7 @@ const allowedOrigins = [
   "http://localhost:4000",
   "http://127.0.0.1:5173",
   "http://127.0.0.1:4000",
+  "https://unrelevant-wobbly-brecken.ngrok-free.dev",
 ];
 
 app.use(
