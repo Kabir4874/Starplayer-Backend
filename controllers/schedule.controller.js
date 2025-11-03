@@ -213,7 +213,9 @@ export async function updateSchedule(req, res, next) {
     const { playlistId, datetime } = req.body;
 
     if (Number.isNaN(id)) {
-      return res.status(400).json({ ok: false, message: "Invalid schedule id" });
+      return res
+        .status(400)
+        .json({ ok: false, message: "Invalid schedule id" });
     }
 
     // Make sure the schedule exists
@@ -227,11 +229,15 @@ export async function updateSchedule(req, res, next) {
     if (playlistId !== undefined) {
       const pid = parseInt(playlistId);
       if (Number.isNaN(pid)) {
-        return res.status(400).json({ ok: false, message: "Invalid playlistId" });
+        return res
+          .status(400)
+          .json({ ok: false, message: "Invalid playlistId" });
       }
       const playlist = await prisma.playlist.findUnique({ where: { id: pid } });
       if (!playlist) {
-        return res.status(404).json({ ok: false, message: "Playlist not found" });
+        return res
+          .status(404)
+          .json({ ok: false, message: "Playlist not found" });
       }
       data.playlistId = pid;
     }
@@ -296,4 +302,3 @@ export async function updateSchedule(req, res, next) {
     next(error);
   }
 }
-
