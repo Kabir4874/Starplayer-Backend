@@ -1,71 +1,56 @@
 import ffprobeStatic from "ffprobe-static";
 import ffmpeg from "fluent-ffmpeg";
+import * as musicMetadata from "music-metadata";
 
 ffmpeg.setFfprobePath(ffprobeStatic.path);
 
 /**
  * Parse filename to extract artist and title
- * Common patterns: "Artist - Title", "Artist_Title", "Artist - Title (Remix)"
+ * Focused only on schema fields: author, title
  */
 function parseFileName(filename) {
   const baseName = filename.replace(/\.[^/.]+$/, ""); // Remove extension
 
-  // Try different patterns
-  let artist = null;
+  let author = null;
   let title = baseName;
-  let year = null;
-  let bpm = null;
 
-  // Pattern 1: "Artist - Title"
-  if (baseName.includes(" - ")) {
-    const parts = baseName.split(" - ");
-    if (parts.length >= 2) {
-      artist = parts[0].trim();
-      title = parts.slice(1).join(" - ").trim();
-    }
-  }
-  // Pattern 2: "Artist_Title"
-  else if (baseName.includes("_")) {
-    const parts = baseName.split("_");
-    if (parts.length >= 2) {
-      artist = parts[0].trim();
-      title = parts.slice(1).join("_").trim();
+  // Common patterns for "Author - Title"
+  const patterns = [
+    /^(.*?)\s*[-–—]\s*(.*?)$/, // "Author - Title"
+    /^(.*?)_(.*?)$/, // "Author_Title"
+  ];
+
+  for (const pattern of patterns) {
+    const match = baseName.match(pattern);
+    if (match) {
+      author = match[1]?.trim() || null;
+      title = match[2]?.trim() || baseName;
+      break;
     }
   }
 
-  // Extract year from title (patterns like "Title (2023)" or "Title 2023")
-  const yearMatch = title.match(/\((\d{4})\)|(\d{4})$/);
-  if (yearMatch) {
-    year = parseInt(yearMatch[1] || yearMatch[2]);
-    title = title.replace(/\(\d{4}\)|\d{4}$/, "").trim();
-  }
+  // Clean up common unwanted patterns
+  const cleanPatterns = [
+    /\[[^\]]*\]/g,
+    /\([^)]*\)/g,
+    /(official\s*(video|audio|lyrics?|version))/gi,
+    /(lyric\s*video)/gi,
+  ];
 
-  // Extract BPM from filename (patterns like "Title 120BPM" or "Title [128BPM]")
-  const bpmMatch =
-    baseName.match(/(\d{2,3})\s*BPM/i) || baseName.match(/\[(\d{2,3})BPM\]/i);
-  if (bpmMatch) {
-    bpm = parseInt(bpmMatch[1]);
-  }
+  title = title.replace(cleanPatterns[0], "");
+  title = title.replace(/\s+/g, " ").trim();
 
-  // Clean up common patterns
-  title = title
-    .replace(/\[Official Video\]/gi, "")
-    .replace(/\(Official Audio\)/gi, "")
-    .replace(/\(Official\)/gi, "")
-    .replace(/\(Lyrics\)/gi, "")
-    .replace(/\([^)]*mix\)/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return { artist, title, year, bpm };
+  return { author, title };
 }
 
 /**
  * Detect media type based on filename and duration
+ * Only SONG, JINGLE, SPOT as per schema
  */
 function detectMediaType(filename, durationSec) {
   const lowerName = filename.toLowerCase();
 
+  // Jingle detection - short audio with specific keywords
   if (
     lowerName.includes("jingle") ||
     lowerName.includes("intro") ||
@@ -74,6 +59,7 @@ function detectMediaType(filename, durationSec) {
     return "JINGLE";
   }
 
+  // Spot detection
   if (
     lowerName.includes("spot") ||
     lowerName.includes("ad") ||
@@ -82,22 +68,19 @@ function detectMediaType(filename, durationSec) {
     return "SPOT";
   }
 
-  if (durationSec && durationSec <= 60) {
-    return "JINGLE";
-  }
+  // Duration-based detection
+  if (durationSec && durationSec <= 30) return "JINGLE";
+  if (durationSec && durationSec <= 120) return "SPOT";
 
-  if (durationSec && durationSec <= 120) {
-    return "SPOT";
-  }
-
+  // Default to SONG
   return "SONG";
 }
 
 /**
- * Detect language based on filename and metadata
+ * Detect language - only ENGLISH, ITALIAN, SPANISH, OTHER as per schema
  */
-function detectLanguage(filename, artist, title) {
-  const text = `${filename} ${artist || ""} ${title || ""}`.toLowerCase();
+function detectLanguage(filename, author, title) {
+  const text = `${filename} ${author || ""} ${title || ""}`.toLowerCase();
 
   // Italian indicators
   const italianWords = [
@@ -108,8 +91,6 @@ function detectLanguage(filename, artist, title) {
     "bello",
     "ragazzo",
     "ragazza",
-    "cuore",
-    "vita",
   ];
   if (italianWords.some((word) => text.includes(word))) {
     return "ITALIAN";
@@ -129,110 +110,243 @@ function detectLanguage(filename, artist, title) {
     return "SPANISH";
   }
 
-  // Default to English if no clear indicators
+  // Default to ENGLISH
   return "ENGLISH";
 }
 
 /**
- * Extract comprehensive metadata using ffprobe and filename parsing
+ * Extract year from various sources
  */
-export function probeFile(filePath, originalName) {
-  return new Promise((resolve, reject) => {
+function extractYear(metadataYear, filename) {
+  // Try to extract year from metadata first
+  if (metadataYear) {
+    const yearMatch = String(metadataYear).match(/\d{4}/);
+    if (yearMatch) {
+      const year = parseInt(yearMatch[0]);
+      if (year > 1900 && year <= new Date().getFullYear() + 1) {
+        return year;
+      }
+    }
+  }
+
+  // Try to extract from filename as fallback
+  const yearMatch = filename.match(/(\d{4})/);
+  if (yearMatch) {
+    const year = parseInt(yearMatch[1]);
+    if (year > 1900 && year <= new Date().getFullYear() + 1) {
+      return year;
+    }
+  }
+
+  // Default to current year
+  return new Date().getFullYear();
+}
+
+/**
+ * Extract BPM from metadata
+ */
+function extractBPM(metadataBPM) {
+  if (!metadataBPM) return null;
+
+  const bpm = parseInt(metadataBPM);
+  if (!isNaN(bpm) && bpm > 30 && bpm < 300) {
+    return bpm;
+  }
+  return null;
+}
+
+/**
+ * Extract duration and round to seconds
+ */
+function extractDuration(duration) {
+  if (!duration) return 0;
+  return Math.round(duration);
+}
+
+/**
+ * Extract metadata using ffprobe
+ */
+function extractMetadataWithFFprobe(filePath) {
+  return new Promise((resolve) => {
     ffmpeg.ffprobe(filePath, (err, data) => {
-      if (err) {
-        // If ffprobe fails, use only filename parsing
-        const fileInfo = parseFileName(originalName);
-        const durationSec = null;
-        const mediaType = detectMediaType(originalName, durationSec);
-        const language = detectLanguage(
-          originalName,
-          fileInfo.artist,
-          fileInfo.title
-        );
-
-        const missing = ["duration", "bpm", "title", "author", "year"].filter(
-          (field) => {
-            if (field === "title") return !fileInfo.title;
-            if (field === "author") return !fileInfo.artist;
-            if (field === "year") return !fileInfo.year;
-            if (field === "bpm") return !fileInfo.bpm;
-            if (field === "duration") return !durationSec;
-            return true;
-          }
-        );
-
-        resolve({
-          durationSec,
-          title: fileInfo.title || originalName.replace(/\.[^/.]+$/, ""),
-          artist: fileInfo.artist || "Unknown Artist",
-          year: fileInfo.year || new Date().getFullYear(),
-          bpm: fileInfo.bpm,
-          mediaType,
-          language,
-          missing,
-        });
+      if (err || !data) {
+        resolve(null);
         return;
       }
 
       const format = data.format || {};
       const streams = data.streams || [];
-      const tags = {
-        ...(format.tags || {}),
-        ...((streams[0] && streams[0].tags) || {}),
+
+      // Merge all tags
+      let mergedTags = { ...(format.tags || {}) };
+      streams.forEach((stream) => {
+        mergedTags = { ...mergedTags, ...(stream.tags || {}) };
+      });
+
+      // Helper function to get tag value case-insensitively
+      const getTag = (keys) => {
+        const lowerMap = {};
+        Object.keys(mergedTags).forEach((k) => {
+          lowerMap[k.toLowerCase()] = mergedTags[k];
+        });
+
+        for (const key of keys) {
+          const value = lowerMap[key.toLowerCase()];
+          if (
+            value !== undefined &&
+            value !== null &&
+            `${value}`.trim() !== ""
+          ) {
+            return `${value}`.trim();
+          }
+        }
+        return null;
       };
 
-      const durationSec = format.duration
-        ? Math.round(Number(format.duration))
-        : null;
-
-      // Get metadata from file tags
-      const tagTitle = tags.title || tags.TITLE;
-      const tagArtist = tags.artist || tags.ARTIST || tags.Author;
-      const tagYear = tags.date || tags.year || tags.YEAR;
-
-      // Parse filename for additional info
-      const fileInfo = parseFileName(originalName);
-
-      // Combine tag data and filename data (prefer tags)
-      const title =
-        tagTitle || fileInfo.title || originalName.replace(/\.[^/.]+$/, "");
-      const artist = tagArtist || fileInfo.artist || "Unknown Artist";
-
-      let year = null;
-      if (tagYear) {
-        const y = String(tagYear).match(/\d{4}/);
-        year = y ? Number(y[0]) : null;
-      }
-      year = year || fileInfo.year || new Date().getFullYear();
-
-      const bpm = tags.TBPM
-        ? Number(tags.TBPM)
-        : tags.bpm
-        ? Number(tags.bpm)
-        : fileInfo.bpm;
-
-      // Detect media type and language
-      const mediaType = detectMediaType(originalName, durationSec);
-      const language = detectLanguage(originalName, artist, title);
-
-      // Determine missing metadata
-      const missing = [];
-      if (!tagTitle && !fileInfo.title) missing.push("title");
-      if (!tagArtist && !fileInfo.artist) missing.push("author");
-      if (!tagYear && !fileInfo.year) missing.push("year");
-      if (!bpm) missing.push("bpm");
-      if (!durationSec) missing.push("duration");
-
       resolve({
-        durationSec,
-        title,
-        artist,
-        year,
-        bpm,
-        mediaType,
-        language,
-        missing,
+        duration: format.duration,
+        bitrate: format.bitrate,
+        title: getTag(["title", "TITLE"]),
+        artist: getTag(["artist", "ARTIST", "author", "ALBUM_ARTIST"]),
+        year: getTag(["date", "year", "YEAR", "creation_time"]),
+        bpm: getTag(["TBPM", "bpm", "BPM", "tempo"]),
       });
     });
   });
 }
+
+/**
+ * Main metadata extraction focused only on schema fields
+ */
+export async function probeFile(filePath, originalName) {
+  try {
+    let musicMeta = null;
+    let ffprobeMeta = null;
+
+    // Check if file exists before processing
+    const fs = await import("fs-extra");
+    if (!(await fs.pathExists(filePath))) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+
+    // Try music-metadata first (better for audio files)
+    try {
+      musicMeta = await musicMetadata.parseFile(filePath);
+    } catch (error) {
+      console.warn("music-metadata failed:", error.message);
+    }
+
+    // Try ffprobe as fallback
+    try {
+      ffprobeMeta = await extractMetadataWithFFprobe(filePath);
+    } catch (error) {
+      console.warn("ffprobe failed:", error.message);
+    }
+
+    // Parse filename for basic info
+    const fileInfo = parseFileName(originalName);
+
+    // Extract duration from available sources
+    let durationSec = 0;
+    if (musicMeta?.format?.duration) {
+      durationSec = extractDuration(musicMeta.format.duration);
+    } else if (ffprobeMeta?.duration) {
+      durationSec = extractDuration(ffprobeMeta.duration);
+    }
+
+    // Extract author/artist
+    let author = fileInfo.author || "Unknown Artist";
+    if (musicMeta?.common?.artist) {
+      author = musicMeta.common.artist;
+    } else if (ffprobeMeta?.artist) {
+      author = ffprobeMeta.artist;
+    }
+
+    // Extract title
+    let title = fileInfo.title || originalName.replace(/\.[^/.]+$/, "");
+    if (musicMeta?.common?.title) {
+      title = musicMeta.common.title;
+    } else if (ffprobeMeta?.title) {
+      title = ffprobeMeta.title;
+    }
+
+    // Extract year
+    let year = new Date().getFullYear();
+    if (musicMeta?.common?.year) {
+      year = extractYear(musicMeta.common.year, originalName);
+    } else if (ffprobeMeta?.year) {
+      year = extractYear(ffprobeMeta.year, originalName);
+    }
+
+    // Extract BPM
+    let bpm = null;
+    if (musicMeta?.common?.bpm) {
+      bpm = extractBPM(musicMeta.common.bpm);
+    } else if (ffprobeMeta?.bpm) {
+      bpm = extractBPM(ffprobeMeta.bpm);
+    }
+
+    // Detect media type and language
+    const mediaType = detectMediaType(originalName, durationSec);
+    const language = detectLanguage(originalName, author, title);
+
+    // Determine missing fields
+    const missing = [];
+    if (!title || title === originalName.replace(/\.[^/.]+$/, ""))
+      missing.push("title");
+    if (!author || author === "Unknown Artist") missing.push("author");
+    if (!year) missing.push("year");
+    if (!bpm) missing.push("bpm");
+    if (!durationSec) missing.push("duration");
+
+    return {
+      // Required fields for Media model
+      type: mediaType,
+      author: author,
+      title: title,
+      year: year,
+      fileName: originalName,
+      language: language,
+      bpm: bpm,
+      durationSec: durationSec,
+      missing: missing,
+
+      // Additional info for debugging
+      source: {
+        musicMetadata: !!musicMeta,
+        ffprobe: !!ffprobeMeta,
+        filename: true,
+      },
+    };
+  } catch (error) {
+    console.error("Metadata extraction completely failed:", error);
+
+    // Fallback to absolute minimum using filename only
+    const fileInfo = parseFileName(originalName);
+    const mediaType = detectMediaType(originalName, null);
+    const language = detectLanguage(
+      originalName,
+      fileInfo.author,
+      fileInfo.title
+    );
+
+    return {
+      type: mediaType,
+      author: fileInfo.author || "Unknown Artist",
+      title: fileInfo.title || originalName.replace(/\.[^/.]+$/, ""),
+      year: new Date().getFullYear(),
+      fileName: originalName,
+      language: language,
+      bpm: null,
+      durationSec: 0,
+      missing: ["duration", "bpm"],
+      source: {
+        musicMetadata: false,
+        ffprobe: false,
+        filename: true,
+      },
+    };
+  }
+}
+
+export { detectLanguage, detectMediaType, parseFileName };
