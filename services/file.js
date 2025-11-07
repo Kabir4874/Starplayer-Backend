@@ -5,7 +5,7 @@ import path from "path";
 import { cfg } from "../config/config.js";
 
 /**
- * Calculate file hash to detect duplicate content
+ * Calculate file hash (MD5) to detect duplicate content
  */
 export async function calculateFileHash(filePath) {
   return new Promise((resolve, reject) => {
@@ -20,11 +20,12 @@ export async function calculateFileHash(filePath) {
 
 /**
  * Check if a file already exists in the media directory (case-insensitive)
+ * NOTE: primarily used for defensive checks; content-hash is authoritative.
  */
 export async function fileExistsInMediaDir(fileName) {
   try {
     const files = await fse.readdir(cfg.mediaDir);
-    const lowerCaseFileName = fileName.toLowerCase();
+    const lowerCaseFileName = String(fileName || "").toLowerCase();
     return files.some((file) => file.toLowerCase() === lowerCaseFileName);
   } catch (error) {
     console.warn("Error reading media directory:", error.message);
@@ -60,6 +61,9 @@ async function generateUniqueFilename(baseName, ext) {
   return candidate;
 }
 
+/**
+ * Move a temp file into the Caspar media directory with a safe unique name.
+ */
 export async function moveToCasparMedia(tempPath, originalName) {
   await fse.ensureDir(cfg.mediaDir);
 
@@ -79,6 +83,26 @@ export async function moveToCasparMedia(tempPath, originalName) {
   return { absolutePath: dst, fileName: candidate };
 }
 
+/**
+ * Return Caspar base name (filename without extension).
+ */
 export function casparBaseName(fileName) {
-  return fileName.replace(/\.[^.]+$/, "");
+  return String(fileName || "").replace(/\.[^.]+$/, "");
+}
+
+/**
+ * Normalize a filename stem (lowercase, underscores for spaces, strip non-ASCII)
+ * so we can compare "My Track.mp3" vs "my_track.MP3" etc.
+ */
+export function normalizeStem(name) {
+  const stem = path.basename(
+    String(name || ""),
+    path.extname(String(name || ""))
+  );
+  return stem
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w\s\-\.]+/g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_");
 }

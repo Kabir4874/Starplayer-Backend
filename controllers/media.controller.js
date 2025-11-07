@@ -2,7 +2,11 @@ import fse from "fs-extra";
 import multer from "multer";
 import path from "path";
 import { cfg } from "../config/config.js";
-import { fileExistsInMediaDir, moveToCasparMedia } from "../services/file.js";
+import {
+  calculateFileHash,
+  moveToCasparMedia, 
+  normalizeStem,
+} from "../services/file.js";
 import { probeFile } from "../services/metadata.js";
 import { prisma } from "../services/prisma.js";
 
@@ -76,7 +80,7 @@ export const uploadMiddleware = upload.array("files", 500);
 
 /**
  * POST /api/media - Upload media files with automatic metadata extraction
- * Prevents duplicate files from being uploaded
+ * Robust duplicate prevention (content hash + normalized name)
  */
 export async function addMedia(req, res, next) {
   const files = req.files || [];
@@ -86,7 +90,7 @@ export async function addMedia(req, res, next) {
       return res.status(400).json({ ok: false, message: "No files uploaded." });
     }
 
-    // Optional category passed from the new Asset Manager
+    // Optional category passed from the Asset Manager
     const bodyCategory = req.body?.category
       ? String(req.body.category).toUpperCase()
       : null;
@@ -100,68 +104,84 @@ export async function addMedia(req, res, next) {
       bpm: 0,
     };
 
-    // Pre-load existing file information for duplicate checking
-    const existingFiles = new Set();
-    const existingHashes = new Set();
+    // ── Build duplicate detection caches ─────────────────────
+    const existingHashes = new Set(); // content hashes
+    const existingNamesLower = new Set(); // exact file names (lower)
+    const existingStems = new Set(); // normalized stems
 
-    // Get all existing media from database
+    // DB filenames
     const allMedia = await prisma.media.findMany({
       select: { fileName: true },
     });
 
-    // Populate existing files set (case-insensitive)
-    allMedia.forEach((media) =>
-      existingFiles.add(media.fileName.toLowerCase())
-    );
+    for (const m of allMedia) {
+      const fn = String(m.fileName || "");
+      existingNamesLower.add(fn.toLowerCase());
+      existingStems.add(normalizeStem(fn));
+    }
 
-    // Calculate hashes for existing files to detect content duplicates
+    // FS filenames + content hashes
     try {
+      await fse.ensureDir(cfg.mediaDir);
       const mediaFiles = await fse.readdir(cfg.mediaDir);
       for (const fileName of mediaFiles) {
         try {
           const filePath = path.join(cfg.mediaDir, fileName);
+          const stat = await fse.stat(filePath);
+          if (!stat.isFile()) continue;
+
+          // name caches
+          existingNamesLower.add(fileName.toLowerCase());
+          existingStems.add(normalizeStem(fileName));
+
+          // content hash
           const fileHash = await calculateFileHash(filePath);
           existingHashes.add(fileHash);
         } catch (error) {
           console.warn(
-            `Could not calculate hash for ${fileName}:`,
+            `Could not process existing file ${fileName}:`,
             error.message
           );
         }
       }
     } catch (error) {
-      console.warn(
-        "Error reading media directory for hash calculation:",
-        error.message
-      );
+      console.warn("Error loading media directory for dedupe:", error.message);
     }
 
+    // ── Process uploads ──────────────────────────────────────
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
 
       try {
-        // Check 1: Check if file already exists in database (case-insensitive)
-        const fileExistsInDB = existingFiles.has(
-          file.originalname.toLowerCase()
-        );
+        // Compute temp file hash once (authoritative dedupe)
+        let tmpHash = null;
+        try {
+          tmpHash = await calculateFileHash(file.path);
+        } catch (e) {
+          // If hash fails, we still have name-based checks
+          console.warn(`Hash failed for ${file.originalname}:`, e.message);
+        }
 
-        // Check 2: Check if file already exists in media directory
-        const fileExistsInFS = await fileExistsInMediaDir(file.originalname);
+        const originalLower = String(file.originalname || "").toLowerCase();
+        const originalStem = normalizeStem(file.originalname);
 
-        // Check 3: Check if file content already exists (by hash)
-        const contentExists = await findDuplicateByHash(
-          file.path,
-          existingHashes
-        );
+        // Check A: exact name already in DB/FS (case-insensitive)
+        const nameExists = existingNamesLower.has(originalLower);
 
-        if (fileExistsInDB || fileExistsInFS || contentExists) {
+        // Check B: normalized stem already present (handles "My Song.mp3" vs "my_song.MP3")
+        const stemExists = existingStems.has(originalStem);
+
+        // Check C: content hash duplicate
+        const contentExists = tmpHash ? existingHashes.has(tmpHash) : false;
+
+        if (contentExists || nameExists || stemExists) {
           // Clean up temp file since we're skipping this duplicate
           await fse.remove(file.path).catch(() => {});
 
-          let reason = "File already exists";
-          if (contentExists && !fileExistsInDB && !fileExistsInFS) {
-            reason = "File content already exists (different filename)";
-          }
+          let reason = "Duplicate detected";
+          if (contentExists) reason = "Duplicate content (hash match)";
+          else if (nameExists) reason = "Duplicate filename";
+          else if (stemExists) reason = "Duplicate name (normalized)";
 
           results.push({
             ok: false,
@@ -170,22 +190,22 @@ export async function addMedia(req, res, next) {
             skipped: true,
             duplicate: true,
           });
-          continue; // Skip to next file
+          continue;
         }
 
-        // First, move the file to Caspar media folder
+        // Move the file into the media folder with a safe unique name
         const { absolutePath, fileName: newFileName } = await moveToCasparMedia(
           file.path,
           file.originalname
         );
 
-        // Add the new filename to our existing files set to prevent duplicates in same batch
-        existingFiles.add(newFileName.toLowerCase());
-
-        // Calculate and store the hash of the new file
+        // Update caches to prevent duplicates within the same batch
+        existingNamesLower.add(newFileName.toLowerCase());
+        existingStems.add(normalizeStem(newFileName));
         try {
-          const newFileHash = await calculateFileHash(absolutePath);
-          existingHashes.add(newFileHash);
+          const newFileHash =
+            tmpHash ?? (await calculateFileHash(absolutePath));
+          if (newFileHash) existingHashes.add(newFileHash);
         } catch (error) {
           console.warn(
             `Could not calculate hash for new file ${newFileName}:`,
@@ -193,40 +213,32 @@ export async function addMedia(req, res, next) {
           );
         }
 
-        // Then probe the file from its final location
+        // Probe from final location
         const meta = await probeFile(absolutePath, file.originalname);
 
-        // Meta extracted (robust ffprobe + filename parse)
-        const title = meta.title;
-        const author = meta.author;
-        const year = meta.year;
-        const bpm = meta.bpm;
-        const duration = meta.durationSec;
-        const mediaType = meta.type;
-        const language = meta.language;
-
+        // Missing fields aggregation
         meta.missing.forEach((field) => {
           if (missingAggregateCount[field] !== undefined) {
             missingAggregateCount[field]++;
           }
         });
 
-        // If UI provided explicit category, override detected type
+        // Resolve type override from UI category
         const finalType = bodyCategory
           ? categoryToType(bodyCategory)
-          : mediaType;
+          : meta.type;
 
         const saved = await prisma.media.create({
           data: {
             type: finalType,
-            author: author,
-            title: title,
-            year: year,
+            author: meta.author,
+            title: meta.title,
+            year: meta.year,
             fileName: newFileName,
             uploadDate: new Date(),
-            language,
-            bpm: bpm ? Math.round(bpm) : null,
-            duration: duration ? Math.round(duration) : 0,
+            language: meta.language,
+            bpm: meta.bpm ? Math.round(meta.bpm) : null,
+            duration: meta.durationSec ? Math.round(meta.durationSec) : 0,
           },
         });
 
@@ -237,7 +249,7 @@ export async function addMedia(req, res, next) {
           missingMeta: meta.missing,
           autoDetected: {
             type: finalType,
-            language: language,
+            language: meta.language,
           },
         });
       } catch (fileError) {
@@ -262,21 +274,22 @@ export async function addMedia(req, res, next) {
     const duplicateFiles = results.filter((r) => r.duplicate).length;
 
     const response = {
-      ok: true,
+      ok: successfulUploads > 0, // ✅ only true if at least one saved
       totalUploaded: files.length,
       successful: successfulUploads,
       failed: failedUploads,
       duplicates: duplicateFiles,
       items: results,
       missingSummary: missingAggregateCount,
+      message:
+        successfulUploads > 0
+          ? duplicateFiles > 0
+            ? `${duplicateFiles} file(s) were skipped as duplicates.`
+            : "Upload complete."
+          : "No files were saved (all duplicates or failed).",
     };
 
-    // Add message if there were duplicates
-    if (duplicateFiles > 0) {
-      response.message = `${duplicateFiles} file(s) were skipped because they already exist.`;
-    }
-
-    res.status(201).json(response);
+    res.status(successfulUploads > 0 ? 201 : 200).json(response);
   } catch (error) {
     console.error("Upload error:", error);
     // Clean any remaining temp files

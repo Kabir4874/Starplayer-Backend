@@ -250,9 +250,6 @@ export async function info(req, res, next) {
   try {
     const ch = parseIntOrDefault(req.body?.channel, cfg.caspar.channel || 1);
     const ly = parseIntOrDefault(req.body?.layer, cfg.caspar.layer || 10);
-
-    console.log("[CASPAR INFO REQUEST]", { channel: ch, layer: ly });
-
     const result = await casparInfo(ch, ly);
 
     res.json({
