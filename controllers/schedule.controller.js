@@ -1,7 +1,8 @@
+// src/controllers/schedule.controller.js
 import { prisma } from "../services/prisma.js";
 
 /**
- * GET /api/schedules - Get all schedules
+ * GET /api/schedules - Get all schedules (with slim playlist info)
  */
 export async function listSchedules(req, res, next) {
   try {
@@ -47,6 +48,7 @@ export async function listSchedules(req, res, next) {
 
 /**
  * POST /api/schedules - Create new schedule
+ * Body: { playlistId:number, datetime: ISO string }
  */
 export async function createSchedule(req, res, next) {
   try {
@@ -59,11 +61,18 @@ export async function createSchedule(req, res, next) {
       });
     }
 
-    // Check if playlist exists
-    const playlist = await prisma.playlist.findUnique({
-      where: { id: parseInt(playlistId) },
-    });
+    // Validate playlist
+    const pid = parseInt(playlistId);
+    if (Number.isNaN(pid)) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid playlistId",
+      });
+    }
 
+    const playlist = await prisma.playlist.findUnique({
+      where: { id: pid },
+    });
     if (!playlist) {
       return res.status(404).json({
         ok: false,
@@ -71,10 +80,19 @@ export async function createSchedule(req, res, next) {
       });
     }
 
+    // Validate datetime
+    const dt = new Date(datetime);
+    if (isNaN(dt.getTime())) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid datetime",
+      });
+    }
+
     const schedule = await prisma.schedule.create({
       data: {
-        playlistId: parseInt(playlistId),
-        datetime: new Date(datetime),
+        playlistId: pid,
+        datetime: dt,
       },
       include: {
         playlist: {
@@ -83,6 +101,7 @@ export async function createSchedule(req, res, next) {
               include: {
                 media: true,
               },
+              orderBy: { order: "asc" },
             },
           },
         },
@@ -117,6 +136,12 @@ export async function deleteSchedule(req, res, next) {
   try {
     const id = parseInt(req.params.id);
 
+    if (Number.isNaN(id)) {
+      return res
+        .status(400)
+        .json({ ok: false, message: "Invalid schedule id" });
+    }
+
     const schedule = await prisma.schedule.findUnique({
       where: { id },
     });
@@ -142,7 +167,7 @@ export async function deleteSchedule(req, res, next) {
 }
 
 /**
- * GET /api/schedules/upcoming - Get upcoming schedules
+ * GET /api/schedules/upcoming - Get upcoming schedules (next 10)
  */
 export async function getUpcomingSchedules(req, res, next) {
   try {
@@ -150,20 +175,14 @@ export async function getUpcomingSchedules(req, res, next) {
 
     const schedules = await prisma.schedule.findMany({
       where: {
-        datetime: {
-          gte: now,
-        },
+        datetime: { gte: now },
       },
       include: {
         playlist: {
           include: {
             playlistItems: {
-              include: {
-                media: true,
-              },
-              orderBy: {
-                order: "asc",
-              },
+              include: { media: true },
+              orderBy: { order: "asc" },
             },
           },
         },
@@ -171,7 +190,7 @@ export async function getUpcomingSchedules(req, res, next) {
       orderBy: {
         datetime: "asc",
       },
-      take: 10, // Limit to next 10 schedules
+      take: 10,
     });
 
     const transformed = schedules.map((schedule) => ({
@@ -206,7 +225,10 @@ export async function getUpcomingSchedules(req, res, next) {
   }
 }
 
-// FUNCTION
+/**
+ * PUT /api/schedules/:id - Update schedule
+ * Body can include { playlistId?: number, datetime?: ISO string }
+ */
 export async function updateSchedule(req, res, next) {
   try {
     const id = parseInt(req.params.id);
@@ -218,14 +240,15 @@ export async function updateSchedule(req, res, next) {
         .json({ ok: false, message: "Invalid schedule id" });
     }
 
-    // Make sure the schedule exists
+    // Ensure the schedule exists
     const existing = await prisma.schedule.findUnique({ where: { id } });
     if (!existing) {
       return res.status(404).json({ ok: false, message: "Schedule not found" });
     }
 
-    // Validate optional fields
-    let data = {};
+    // Build update data
+    const data = {};
+
     if (playlistId !== undefined) {
       const pid = parseInt(playlistId);
       if (Number.isNaN(pid)) {
@@ -241,6 +264,7 @@ export async function updateSchedule(req, res, next) {
       }
       data.playlistId = pid;
     }
+
     if (datetime !== undefined) {
       const dt = new Date(datetime);
       if (isNaN(dt.getTime())) {

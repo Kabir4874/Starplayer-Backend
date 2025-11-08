@@ -303,7 +303,7 @@ function getCasparSocket() {
 
 // Media Control Functions - Use fire and forget for all control commands
 export async function casparPlay(
-  fileBaseName,
+  fileName,
   channel = 1,
   layer = 10,
   options = {}
@@ -311,13 +311,15 @@ export async function casparPlay(
   const socket = getCasparSocket();
 
   // Build play command with options
-  let command = `PLAY ${channel}-${layer} "${fileBaseName}"`;
+  let command = `PLAY ${channel}-${layer} "${fileName}"`;
 
   if (options.loop) command += " LOOP";
   if (options.auto) command += " AUTO";
   if (options.seek !== undefined) command += ` SEEK ${options.seek}`;
   if (options.length !== undefined) command += ` LENGTH ${options.length}`;
   if (options.filter !== undefined) command += ` FILTER ${options.filter}`;
+
+  console.log(`[Caspar] Sending play command: ${command}`);
 
   // Use fire and forget for PLAY commands
   const response = await socket.sendFireAndForget(command);

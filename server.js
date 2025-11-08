@@ -7,6 +7,9 @@ import mediaRoutes from "./routes/media.routes.js";
 import playerRoutes from "./routes/player.routes.js";
 import playlistRoutes from "./routes/playlist.routes.js";
 import scheduleRoutes from "./routes/schedule.routes.js";
+import schedulerRoutes from "./routes/scheduler.routes.js";
+import { startScheduleRunner } from "./services/scheduler.js";
+
 dotenv.config();
 const app = express();
 const port = process.env.PORT;
@@ -36,6 +39,7 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
   })
 );
+
 app.use(express.json());
 app.use(cors());
 app.use(express.urlencoded({ extended: true }));
@@ -47,6 +51,9 @@ app.use("/api/playlists", playlistRoutes);
 app.use("/api/schedules", scheduleRoutes);
 app.use("/api/history", historyRoutes);
 app.use("/api/player", playerRoutes);
+app.use("/api/scheduler", schedulerRoutes);
+
+startScheduleRunner();
 
 app.get("/", (req, res) => {
   res.send("API is running...");
