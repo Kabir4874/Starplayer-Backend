@@ -24,6 +24,7 @@ import {
 } from "../services/caspar.js";
 import { casparBaseName } from "../services/file.js";
 import { prisma } from "../services/prisma.js";
+import { cancelCurrentSchedule } from "../services/scheduler.js";
 
 function parseIntOrDefault(v, dflt) {
   if (v === undefined || v === null) return dflt;
@@ -45,6 +46,21 @@ export async function play(req, res, next) {
   try {
     let { fileName, id, channel, layer, loop, auto, seek, length, filter } =
       req.body || {};
+
+    // 🚫 CANCEL CURRENT SCHEDULE IF RUNNING (manual override)
+    try {
+      const cancelResult = await cancelCurrentSchedule("manual_caspar_play");
+      if (cancelResult?.cancelledScheduleId) {
+        console.log(
+          `[CASPAR PLAY] Cancelled running schedule #${cancelResult.cancelledScheduleId} due to manual Caspar play.`
+        );
+      }
+    } catch (e) {
+      console.warn(
+        "[CASPAR PLAY] Failed to cancel current schedule:",
+        e?.message || e
+      );
+    }
 
     // Resolve filename by id if needed
     if (!fileName && id != null) {
@@ -547,7 +563,7 @@ export async function testConnection(req, res, next) {
   try {
     console.log("[CASPAR CONNECTION TEST REQUEST]");
 
-    const result = await testCasparConnection();
+    const result = testCasparConnection();
 
     res.json({
       ok: result.connected,
@@ -567,7 +583,7 @@ export async function status(req, res, next) {
   try {
     console.log("[CASPAR STATUS REQUEST]");
 
-    const result = await getCasparStatus();
+    const result = getCasparStatus();
 
     res.json({
       ok: true,

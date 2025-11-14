@@ -7,7 +7,10 @@ import {
   listSchedules,
   updateSchedule,
 } from "../controllers/schedule.controller.js";
-import { startScheduleRunner } from "../services/scheduler.js";
+import {
+  getSchedulerStatus,
+  startScheduleRunner,
+} from "../services/scheduler.js";
 
 const router = Router();
 

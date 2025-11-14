@@ -1,3 +1,4 @@
+// src/routes/caspar.routes.js
 import { Router } from "express";
 import multer from "multer";
 import {
@@ -45,6 +46,8 @@ router.post("/kill", parseFieldsOnly, kill);
 // Media Information
 router.get("/list", listServerMedia);
 router.post("/info", parseFieldsOnly, info);
+// Added GET for info to match frontend casparAPI.info()
+router.get("/info", info);
 router.post("/info/template", parseFieldsOnly, infoTemplate);
 
 // Media Playback Control

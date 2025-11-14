@@ -4,7 +4,7 @@ import path from "path";
 import { cfg } from "../config/config.js";
 import {
   calculateFileHash,
-  moveToCasparMedia, 
+  moveToCasparMedia,
   normalizeStem,
 } from "../services/file.js";
 import { probeFile } from "../services/metadata.js";
@@ -12,41 +12,19 @@ import { prisma } from "../services/prisma.js";
 
 /* ───────────────────────── Helpers ───────────────────────── */
 
-const CAT = Object.freeze({
-  AUDIO: "AUDIO",
-  JINGLES: "JINGLES",
-  SPOTS: "SPOTS",
-});
-
 const TYPE = Object.freeze({
   SONG: "SONG",
   JINGLE: "JINGLE",
   SPOT: "SPOT",
 });
 
-/** Map UI category -> DB type */
-function categoryToType(category) {
-  const c = String(category || "").toUpperCase();
-  if (c === CAT.JINGLES) return TYPE.JINGLE;
-  if (c === CAT.SPOTS) return TYPE.SPOT;
-  return TYPE.SONG; // AUDIO
-}
-
-/** Map DB type -> UI category */
-function typeToCategory(type) {
-  const t = String(type || "").toUpperCase();
-  if (t === TYPE.JINGLE) return CAT.JINGLES;
-  if (t === TYPE.SPOT) return CAT.SPOTS;
-  return CAT.AUDIO; // SONG or unknown => AUDIO
-}
-
-/** Attach computed "category" for frontend compatibility */
-function withCategory(media) {
-  if (!media) return media;
-  return { ...media, category: typeToCategory(media.type) };
-}
-function withCategoryArray(items) {
-  return (items || []).map(withCategory);
+/** Normalize any incoming type value to SONG / JINGLE / SPOT (or null) */
+function normalizeType(raw) {
+  const t = String(raw || "").toUpperCase();
+  if (t === TYPE.SONG) return TYPE.SONG;
+  if (t === TYPE.JINGLE) return TYPE.JINGLE;
+  if (t === TYPE.SPOT) return TYPE.SPOT;
+  return null;
 }
 
 /* ───────────────────────── Multer ───────────────────────── */
@@ -81,6 +59,7 @@ export const uploadMiddleware = upload.array("files", 500);
 /**
  * POST /api/media - Upload media files with automatic metadata extraction
  * Robust duplicate prevention (content hash + normalized name)
+ * Uses Media.type only (SONG/JINGLE/SPOT), no separate category.
  */
 export async function addMedia(req, res, next) {
   const files = req.files || [];
@@ -90,10 +69,8 @@ export async function addMedia(req, res, next) {
       return res.status(400).json({ ok: false, message: "No files uploaded." });
     }
 
-    // Optional category passed from the Asset Manager
-    const bodyCategory = req.body?.category
-      ? String(req.body.category).toUpperCase()
-      : null;
+    // Optional explicit type passed from UI (SONG/JINGLE/SPOT)
+    const bodyType = normalizeType(req.body?.type);
 
     const results = [];
     const missingAggregateCount = {
@@ -223,10 +200,9 @@ export async function addMedia(req, res, next) {
           }
         });
 
-        // Resolve type override from UI category
-        const finalType = bodyCategory
-          ? categoryToType(bodyCategory)
-          : meta.type;
+        // Resolve type: body (if valid) overrides auto-detected, default SONG
+        const detectedType = normalizeType(meta.type) || TYPE.SONG;
+        const finalType = bodyType || detectedType;
 
         const saved = await prisma.media.create({
           data: {
@@ -244,7 +220,7 @@ export async function addMedia(req, res, next) {
 
         results.push({
           ok: true,
-          media: withCategory(saved),
+          media: saved,
           storedAt: absolutePath,
           missingMeta: meta.missing,
           autoDetected: {
@@ -307,14 +283,14 @@ export async function addMedia(req, res, next) {
 
 /**
  * GET /api/media - List all media with filtering
+ * Filtering is based on Media.type (SONG/JINGLE/SPOT) and language, etc.
  */
 export async function listMedia(req, res, next) {
   try {
     const {
       page = 1,
       limit = 50,
-      type, // legacy (SONG/JINGLE/SPOT)
-      category, // new (AUDIO/JINGLES/SPOTS)
+      type, // SONG/JINGLE/SPOT
       language,
       search,
       sortBy = "uploadDate",
@@ -326,11 +302,11 @@ export async function listMedia(req, res, next) {
 
     const where = {};
 
-    // Prefer explicit category over 'type' if provided
-    if (category && category !== "ALL") {
-      where.type = categoryToType(category);
-    } else if (type && type !== "ALL") {
-      where.type = type;
+    if (type && type !== "ALL") {
+      const normalized = normalizeType(type);
+      if (normalized) {
+        where.type = normalized;
+      }
     }
 
     if (language && language !== "ALL") {
@@ -355,7 +331,7 @@ export async function listMedia(req, res, next) {
 
     res.json({
       ok: true,
-      items: withCategoryArray(media),
+      items: media,
       pagination: {
         page: parseInt(page),
         limit: take,
@@ -391,7 +367,7 @@ export async function getMedia(req, res, next) {
       return res.status(404).json({ ok: false, message: "Media not found" });
     }
 
-    res.json({ ok: true, media: withCategory(media) });
+    res.json({ ok: true, media });
   } catch (error) {
     next(error);
   }
@@ -423,7 +399,7 @@ export async function deleteMedia(req, res, next) {
     res.json({
       ok: true,
       message: "Media deleted from database and media folder",
-      deleted: withCategory(media),
+      deleted: media,
     });
   } catch (error) {
     next(error);
@@ -513,17 +489,11 @@ export async function getMediaStats(req, res, next) {
       take: 10,
     });
 
-    // Attach category for byType convenience
-    const byTypeWithCategory = byType.map((r) => ({
-      ...r,
-      category: typeToCategory(r.type),
-    }));
-
     res.json({
       ok: true,
       stats: {
         total,
-        byType: byTypeWithCategory,
+        byType,
         byLanguage,
         detailed: stats,
         recentUploads: recentUploads.length,
@@ -564,7 +534,7 @@ export async function searchSuggestions(req, res, next) {
 
     res.json({
       ok: true,
-      suggestions: withCategoryArray(media),
+      suggestions: media,
     });
   } catch (error) {
     next(error);
@@ -573,6 +543,7 @@ export async function searchSuggestions(req, res, next) {
 
 /**
  * PUT /api/media/:id - Update media metadata
+ * Uses Media.type only (SONG/JINGLE/SPOT)
  */
 export async function updateMedia(req, res, next) {
   try {
@@ -582,9 +553,8 @@ export async function updateMedia(req, res, next) {
       author,
       year,
       bpm,
-      type, // legacy
+      type, // SONG/JINGLE/SPOT (optional)
       language,
-      category, // new
     } = req.body;
 
     const media = await prisma.media.findUnique({ where: { id } });
@@ -592,13 +562,9 @@ export async function updateMedia(req, res, next) {
       return res.status(404).json({ ok: false, message: "Media not found" });
     }
 
-    // Resolve type precedence: category > type > unchanged
-    let resolvedType = media.type;
-    if (category) {
-      resolvedType = categoryToType(category);
-    } else if (type) {
-      resolvedType = type;
-    }
+    // Resolve new type if provided, else keep previous
+    const normalizedType = type ? normalizeType(type) : null;
+    const resolvedType = normalizedType || media.type;
 
     const updated = await prisma.media.update({
       where: { id },
@@ -614,7 +580,7 @@ export async function updateMedia(req, res, next) {
 
     res.json({
       ok: true,
-      media: withCategory(updated),
+      media: updated,
       message: "Media updated successfully",
     });
   } catch (error) {

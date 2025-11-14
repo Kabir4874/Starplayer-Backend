@@ -1,15 +1,6 @@
 // src/services/scheduler.js
-import { casparPlay, casparStop } from "./caspar.js";
+import { casparPause, casparPlay, casparResume, casparStop } from "./caspar.js";
 import { prisma } from "./prisma.js";
-
-/**
- * Robust schedule runner with proper queue management:
- * - Polls DB for due schedules (datetime <= now)
- * - When due, stops current playback and plays the playlist sequentially
- * - After finishing ALL items in playlist, deletes the schedule
- * - Processes schedules in chronological order
- * - Prevents overlapping playback
- */
 
 const CHANNEL = 1;
 const LAYER = 10;
@@ -36,14 +27,13 @@ const _eventCallbacks = new Set();
 let _scheduleQueue = [];
 let _isProcessingQueue = false;
 
-/**
- * Utility: sleep for ms
- */
+// Control flags
+let _paused = false;
+let _cancelRequested = false;
+let _skipRequested = false;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * Emit events to frontend
- */
 function emitEvent(event, data) {
   _eventCallbacks.forEach((callback) => {
     try {
@@ -54,21 +44,14 @@ function emitEvent(event, data) {
   });
 }
 
-/**
- * Subscribe to scheduler events
- */
 export function onSchedulerEvent(callback) {
   _eventCallbacks.add(callback);
   return () => _eventCallbacks.delete(callback);
 }
 
-/**
- * Get current playing media for frontend
- */
 export function getCurrentPlayingMedia() {
   if (!_currentPlayingMedia) return null;
 
-  // Calculate elapsed time
   const elapsed = _currentMediaStartTime
     ? Date.now() - _currentMediaStartTime
     : 0;
@@ -81,18 +64,14 @@ export function getCurrentPlayingMedia() {
     elapsed: Math.floor(elapsed / 1000),
     progress,
     startTime: _currentMediaStartTime,
+    paused: _paused,
   };
 }
 
-/**
- * Stop anything playing on Caspar on our channel/layer.
- * Ignore errors so scheduler never crashes.
- */
 async function stopCurrentPlayback() {
   try {
     await casparStop(CHANNEL, LAYER);
   } catch (e) {
-    // ignore; nothing playing or transient error
     console.log(
       "[Scheduler] Stop playback - nothing playing or error:",
       e.message
@@ -100,17 +79,13 @@ async function stopCurrentPlayback() {
   }
 }
 
-/**
- * Fetch all due schedules (oldest first).
- * We DO NOT delete here; deletion happens after successful run.
- */
 async function getDueSchedules() {
   const now = new Date();
   return prisma.schedule.findMany({
     where: {
       datetime: { lte: now },
     },
-    orderBy: { datetime: "asc" }, // Process in chronological order
+    orderBy: { datetime: "asc" },
     select: {
       id: true,
       datetime: true,
@@ -119,9 +94,6 @@ async function getDueSchedules() {
   });
 }
 
-/**
- * Resolve playlist items with media, in order.
- */
 async function getPlaylistQueue(playlistId) {
   const items = await prisma.playlistItem.findMany({
     where: { playlistId: Number(playlistId) },
@@ -129,15 +101,11 @@ async function getPlaylistQueue(playlistId) {
     include: { media: true },
   });
 
-  // Flatten to a simple play queue of media records (skip any missing)
   const queue = items.map((it) => it.media).filter((m) => m && m.fileName);
 
   return queue;
 }
 
-/**
- * Log a history record for the given media.
- */
 async function logHistory(mediaId) {
   try {
     await prisma.history.create({
@@ -148,14 +116,9 @@ async function logHistory(mediaId) {
     });
   } catch (error) {
     console.warn("[Scheduler] Failed to log history:", error.message);
-    // ignore history errors
   }
 }
 
-/**
- * Play a single media on Caspar and wait for its duration.
- * If duration missing, wait a small safety window.
- */
 async function playMediaAndWait(media, scheduleId, index, total) {
   const fileName = media.fileName;
   if (!fileName) {
@@ -165,26 +128,25 @@ async function playMediaAndWait(media, scheduleId, index, total) {
 
   console.log(`[Scheduler] Playing media: ${fileName}`);
 
-  // Set current playing media for frontend
   _currentPlayingMedia = {
     ...media,
     scheduleId,
+    playlistId: _runningJob?.playlistId ?? null,
     index,
     total,
     startTime: new Date(),
   };
   _currentMediaStartTime = Date.now();
 
-  // Emit playback started event
   emitEvent("playback_started", {
     scheduleId,
+    playlistId: _runningJob?.playlistId ?? null,
     media,
     index,
     total,
     timestamp: new Date(),
   });
 
-  // Start playing on CasparCG
   try {
     await casparPlay(fileName, CHANNEL, LAYER);
     console.log(`[Scheduler] Successfully sent play command for: ${fileName}`);
@@ -193,69 +155,86 @@ async function playMediaAndWait(media, scheduleId, index, total) {
     _currentPlayingMedia = null;
     _currentMediaStartTime = null;
 
-    // Emit error event
     emitEvent("playback_error", {
       scheduleId,
+      playlistId: _runningJob?.playlistId ?? null,
       media,
       error: error.message,
       timestamp: new Date(),
     });
 
-    throw error; // Re-throw to handle in caller
+    throw error;
   }
 
-  // Log history
   await logHistory(media.id);
 
-  // Wait for the media duration (fallback if missing)
-  const ms =
+  const totalMs =
     typeof media.duration === "number" && media.duration > 0
       ? Math.max(1000, Math.floor(media.duration * 1000))
       : SAFETY_MIN_DURATION_MS;
 
-  console.log(`[Scheduler] Waiting ${ms}ms for media to finish`);
+  console.log(`[Scheduler] Waiting ${totalMs}ms for media to finish`);
 
-  // Emit progress updates every second
-  const startTime = Date.now();
+  const startedAt = Date.now();
+  let remaining = totalMs;
+
   const progressInterval = setInterval(() => {
-    const elapsed = Date.now() - startTime;
-    const progress = Math.min(100, (elapsed / ms) * 100);
+    if (_cancelRequested) return;
+    if (_paused) return;
+
+    const elapsed = Date.now() - startedAt;
+    const progress = Math.min(100, (elapsed / totalMs) * 100);
 
     emitEvent("playback_progress", {
       scheduleId,
+      playlistId: _runningJob?.playlistId ?? null,
       media,
       progress,
       elapsed: Math.floor(elapsed / 1000),
-      remaining: Math.floor((ms - elapsed) / 1000),
+      remaining: Math.max(0, Math.floor((totalMs - elapsed) / 1000)),
       timestamp: new Date(),
     });
   }, 1000);
 
-  await sleep(ms);
+  while (remaining > 0) {
+    if (_cancelRequested || _skipRequested) break;
 
-  // Clear interval and emit completion
+    if (_paused) {
+      await sleep(200);
+      continue;
+    }
+
+    const chunk = Math.min(200, remaining);
+    await sleep(chunk);
+    remaining -= chunk;
+  }
+
   clearInterval(progressInterval);
-  emitEvent("playback_completed", {
-    scheduleId,
-    media,
-    timestamp: new Date(),
-  });
 
-  // Clear current playing media
+  if (_cancelRequested) {
+    console.log(
+      "[Scheduler] playMediaAndWait: cancel requested, aborting media early"
+    );
+  } else {
+    emitEvent("playback_completed", {
+      scheduleId,
+      playlistId: _runningJob?.playlistId ?? null,
+      media,
+      skipped: _skipRequested,
+      timestamp: new Date(),
+    });
+  }
+
   _currentPlayingMedia = null;
   _currentMediaStartTime = null;
+  _skipRequested = false;
 }
 
-/**
- * Run a playlist: stop current, then sequentially play all items.
- * Only delete schedule after ALL items are played.
- */
 async function runPlaylist(playlistId, scheduleId) {
   console.log(
     `[Scheduler] Running playlist ${playlistId} for schedule #${scheduleId}`
   );
 
-  // Emit schedule start event
   emitEvent("schedule_started", {
     scheduleId,
     playlistId,
@@ -265,21 +244,25 @@ async function runPlaylist(playlistId, scheduleId) {
   const queue = await getPlaylistQueue(playlistId);
   console.log(`[Scheduler] Playlist queue length: ${queue.length}`);
 
-  // If empty, just delete the schedule and return.
   if (!queue.length) {
     console.log(
       `[Scheduler] Schedule #${scheduleId}: playlist ${playlistId} has no items; removing schedule.`
     );
-    await prisma.schedule.delete({ where: { id: Number(scheduleId) } });
+    try {
+      await prisma.schedule.delete({ where: { id: Number(scheduleId) } });
+    } catch (e) {
+      console.warn(
+        `[Scheduler] Could not delete empty playlist schedule #${scheduleId}:`,
+        e?.message || e
+      );
+    }
 
-    // Emit empty playlist event
     emitEvent("schedule_empty", {
       scheduleId,
       playlistId,
       timestamp: new Date(),
     });
 
-    // Emit schedule deleted event for frontend refresh
     emitEvent("schedule_deleted", {
       scheduleId,
       playlistId,
@@ -287,10 +270,10 @@ async function runPlaylist(playlistId, scheduleId) {
       timestamp: new Date(),
     });
 
+    _claimed.delete(scheduleId);
     return;
   }
 
-  // Stop current playback, then play every item
   console.log(
     `[Scheduler] Starting playlist ${playlistId} for schedule #${scheduleId}...`
   );
@@ -301,6 +284,22 @@ async function runPlaylist(playlistId, scheduleId) {
   for (let i = 0; i < queue.length; i++) {
     const m = queue[i];
     try {
+      if (_cancelRequested) {
+        console.log(
+          `[Scheduler] Schedule #${scheduleId} cancel requested before item ${i}, aborting playlist.`
+        );
+        playbackSuccessful = false;
+        break;
+      }
+
+      while (_paused && !_cancelRequested) {
+        await sleep(200);
+      }
+      if (_cancelRequested) {
+        playbackSuccessful = false;
+        break;
+      }
+
       _runningJob = {
         scheduleId,
         playlistId,
@@ -321,9 +320,9 @@ async function runPlaylist(playlistId, scheduleId) {
         err?.message || err
       );
       playbackSuccessful = false;
-      // Emit error event but continue to next media
       emitEvent("playback_error", {
         scheduleId,
+        playlistId,
         media: m,
         error: err?.message || err,
         timestamp: new Date(),
@@ -331,8 +330,42 @@ async function runPlaylist(playlistId, scheduleId) {
     }
   }
 
-  // Finished -> stop & remove schedule ONLY if all items were played
   await stopCurrentPlayback();
+
+  if (_cancelRequested) {
+    console.log(
+      `[Scheduler] Schedule #${scheduleId} cancelled by user, deleting schedule.`
+    );
+    try {
+      await prisma.schedule.delete({ where: { id: Number(scheduleId) } });
+    } catch (e) {
+      console.warn(
+        `[Scheduler] Could not delete cancelled schedule #${scheduleId}:`,
+        e?.message || e
+      );
+    }
+
+    emitEvent("schedule_stopped", {
+      scheduleId,
+      playlistId,
+      reason: "user_stop",
+      timestamp: new Date(),
+    });
+
+    emitEvent("schedule_deleted", {
+      scheduleId,
+      playlistId,
+      reason: "stopped",
+      timestamp: new Date(),
+    });
+
+    _cancelRequested = false;
+    _runningJob = null;
+    _currentPlayingMedia = null;
+    _currentMediaStartTime = null;
+    _claimed.delete(scheduleId);
+    return;
+  }
 
   if (playbackSuccessful) {
     try {
@@ -341,7 +374,6 @@ async function runPlaylist(playlistId, scheduleId) {
         `[Scheduler] Schedule #${scheduleId} completed; removed from database.`
       );
 
-      // Emit schedule completion and deletion events
       emitEvent("schedule_completed", {
         scheduleId,
         playlistId,
@@ -360,7 +392,6 @@ async function runPlaylist(playlistId, scheduleId) {
         e?.message || e
       );
 
-      // Emit deletion error event
       emitEvent("schedule_deletion_error", {
         scheduleId,
         error: e?.message || e,
@@ -378,6 +409,8 @@ async function runPlaylist(playlistId, scheduleId) {
       reason: "playback_errors",
       timestamp: new Date(),
     });
+
+    _claimed.delete(scheduleId);
   }
 
   _runningJob = null;
@@ -385,9 +418,6 @@ async function runPlaylist(playlistId, scheduleId) {
   _currentMediaStartTime = null;
 }
 
-/**
- * Process the schedule queue in order
- */
 async function processScheduleQueue() {
   if (_isProcessingQueue || _scheduleQueue.length === 0) {
     return;
@@ -396,7 +426,6 @@ async function processScheduleQueue() {
   _isProcessingQueue = true;
 
   try {
-    // Process schedules in chronological order
     _scheduleQueue.sort((a, b) => new Date(a.datetime) - new Date(b.datetime));
 
     for (const schedule of _scheduleQueue) {
@@ -419,34 +448,26 @@ async function processScheduleQueue() {
           `[Scheduler] Fatal error running schedule #${schedule.id}:`,
           err?.message || err
         );
-        // Emit fatal error event
         emitEvent("schedule_fatal_error", {
           scheduleId: schedule.id,
           error: err?.message || err,
           timestamp: new Date(),
         });
-        // unclaim so it can be re-picked next tick if needed
         _claimed.delete(schedule.id);
       }
     }
   } finally {
     _isProcessingQueue = false;
-    // Clear the queue after processing
     _scheduleQueue = [];
   }
 }
 
-/**
- * Try to pick due schedules and add them to queue.
- */
 async function tick() {
-  // If already running a job or processing queue, skip this tick
   if (_runningJob || _isProcessingQueue) {
     console.log(`[Scheduler] Tick skipped - job running or queue processing`);
     return;
   }
 
-  // Find all due schedules
   const dueSchedules = await getDueSchedules();
   if (!dueSchedules.length) {
     console.log("[Scheduler] No due schedules found");
@@ -458,7 +479,6 @@ async function tick() {
     dueSchedules
   );
 
-  // Filter out already claimed schedules
   const newSchedules = dueSchedules.filter(
     (schedule) => !_claimed.has(schedule.id)
   );
@@ -469,16 +489,12 @@ async function tick() {
     );
     _scheduleQueue.push(...newSchedules);
 
-    // Start processing the queue
     processScheduleQueue().catch((e) =>
       console.error("[Scheduler] Queue processing error:", e?.message || e)
     );
   }
 }
 
-/**
- * Start the schedule runner (idempotent).
- */
 export function startScheduleRunner() {
   if (_started) {
     console.log("[Scheduler] Already started, skipping");
@@ -494,9 +510,6 @@ export function startScheduleRunner() {
   }, TICK_MS);
 }
 
-/**
- * Optional: stop the runner (not typically needed)
- */
 export function stopScheduleRunner() {
   if (_tickHandle) {
     clearInterval(_tickHandle);
@@ -508,12 +521,12 @@ export function stopScheduleRunner() {
   _scheduleQueue = [];
   _isProcessingQueue = false;
   _claimed.clear();
+  _paused = false;
+  _cancelRequested = false;
+  _skipRequested = false;
   console.log("[Scheduler] Stopped");
 }
 
-/**
- * Get current scheduler status for monitoring
- */
 export function getSchedulerStatus() {
   return {
     started: _started,
@@ -523,5 +536,133 @@ export function getSchedulerStatus() {
     scheduleQueue: _scheduleQueue,
     isProcessingQueue: _isProcessingQueue,
     tickHandle: _tickHandle !== null,
+    paused: _paused,
+    cancelRequested: _cancelRequested,
   };
+}
+
+export async function pauseCurrentSchedule() {
+  if (!_runningJob) {
+    console.log("[Scheduler] pauseCurrentSchedule: no running job");
+    return false;
+  }
+  if (_paused) return true;
+
+  _paused = true;
+
+  try {
+    await casparPause(CHANNEL, LAYER);
+  } catch (e) {
+    console.warn(
+      "[Scheduler] pauseCurrentSchedule casparPause error:",
+      e?.message || e
+    );
+  }
+
+  emitEvent("schedule_paused", {
+    scheduleId: _runningJob.scheduleId,
+    playlistId: _runningJob.playlistId,
+    mediaId: _runningJob.mediaId,
+    timestamp: new Date(),
+  });
+
+  return true;
+}
+
+export async function resumeCurrentSchedule() {
+  if (!_runningJob) {
+    console.log("[Scheduler] resumeCurrentSchedule: no running job");
+    return false;
+  }
+  if (!_paused) return true;
+
+  _paused = false;
+
+  try {
+    await casparResume(CHANNEL, LAYER);
+  } catch (e) {
+    console.warn(
+      "[Scheduler] resumeCurrentSchedule casparResume error:",
+      e?.message || e
+    );
+  }
+
+  emitEvent("schedule_resumed", {
+    scheduleId: _runningJob.scheduleId,
+    playlistId: _runningJob.playlistId,
+    mediaId: _runningJob.mediaId,
+    timestamp: new Date(),
+  });
+
+  return true;
+}
+
+export async function stopCurrentSchedule() {
+  if (!_runningJob) {
+    console.log("[Scheduler] stopCurrentSchedule: no running job");
+    return false;
+  }
+
+  const scheduleId = _runningJob.scheduleId;
+  const playlistId = _runningJob.playlistId;
+
+  _cancelRequested = true;
+  _paused = false;
+  _skipRequested = false;
+
+  // 🔴 IMPORTANT: immediately stop Caspar playback on the schedule layer
+  try {
+    await casparStop(CHANNEL, LAYER);
+  } catch (e) {
+    console.warn(
+      "[Scheduler] stopCurrentSchedule casparStop error:",
+      e?.message || e
+    );
+  }
+
+  emitEvent("schedule_stop_requested", {
+    scheduleId,
+    playlistId,
+    mediaId: _runningJob.mediaId,
+    timestamp: new Date(),
+  });
+
+  // Return info so API callers can log which schedule was cancelled
+  return {
+    cancelled: true,
+    scheduleId,
+    playlistId,
+  };
+}
+
+// Backwards-compatible alias
+export async function cancelCurrentSchedule() {
+  return stopCurrentSchedule();
+}
+
+export async function nextInCurrentSchedule() {
+  if (!_runningJob) {
+    console.log("[Scheduler] nextInCurrentSchedule: no running job");
+    return false;
+  }
+
+  _skipRequested = true;
+
+  try {
+    await casparStop(CHANNEL, LAYER);
+  } catch (e) {
+    console.warn(
+      "[Scheduler] nextInCurrentSchedule casparStop error:",
+      e?.message || e
+    );
+  }
+
+  emitEvent("schedule_next_requested", {
+    scheduleId: _runningJob.scheduleId,
+    playlistId: _runningJob.playlistId,
+    mediaId: _runningJob.mediaId,
+    timestamp: new Date(),
+  });
+
+  return true;
 }
