@@ -32,6 +32,9 @@ let _paused = false;
 let _cancelRequested = false;
 let _skipRequested = false;
 
+// Hard-abort flag: when true, processScheduleQueue will break early
+let _forceAbortAll = false;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function emitEvent(event, data) {
@@ -197,7 +200,7 @@ async function playMediaAndWait(media, scheduleId, index, total) {
   }, 1000);
 
   while (remaining > 0) {
-    if (_cancelRequested || _skipRequested) break;
+    if (_cancelRequested || _skipRequested || _forceAbortAll) break;
 
     if (_paused) {
       await sleep(200);
@@ -211,9 +214,9 @@ async function playMediaAndWait(media, scheduleId, index, total) {
 
   clearInterval(progressInterval);
 
-  if (_cancelRequested) {
+  if (_cancelRequested || _forceAbortAll) {
     console.log(
-      "[Scheduler] playMediaAndWait: cancel requested, aborting media early"
+      "[Scheduler] playMediaAndWait: cancel/abort requested, aborting media early"
     );
   } else {
     emitEvent("playback_completed", {
@@ -283,6 +286,16 @@ async function runPlaylist(playlistId, scheduleId) {
 
   for (let i = 0; i < queue.length; i++) {
     const m = queue[i];
+
+    // Respect hard abort
+    if (_forceAbortAll) {
+      console.log(
+        `[Scheduler] Force abort flag set while running schedule #${scheduleId}, breaking playlist loop.`
+      );
+      playbackSuccessful = false;
+      break;
+    }
+
     try {
       if (_cancelRequested) {
         console.log(
@@ -292,10 +305,10 @@ async function runPlaylist(playlistId, scheduleId) {
         break;
       }
 
-      while (_paused && !_cancelRequested) {
+      while (_paused && !_cancelRequested && !_forceAbortAll) {
         await sleep(200);
       }
-      if (_cancelRequested) {
+      if (_cancelRequested || _forceAbortAll) {
         playbackSuccessful = false;
         break;
       }
@@ -332,9 +345,9 @@ async function runPlaylist(playlistId, scheduleId) {
 
   await stopCurrentPlayback();
 
-  if (_cancelRequested) {
+  if (_cancelRequested || _forceAbortAll) {
     console.log(
-      `[Scheduler] Schedule #${scheduleId} cancelled by user, deleting schedule.`
+      `[Scheduler] Schedule #${scheduleId} cancelled/aborted by user, deleting schedule.`
     );
     try {
       await prisma.schedule.delete({ where: { id: Number(scheduleId) } });
@@ -348,7 +361,7 @@ async function runPlaylist(playlistId, scheduleId) {
     emitEvent("schedule_stopped", {
       scheduleId,
       playlistId,
-      reason: "user_stop",
+      reason: _forceAbortAll ? "user_stop_force" : "user_stop",
       timestamp: new Date(),
     });
 
@@ -400,7 +413,7 @@ async function runPlaylist(playlistId, scheduleId) {
     }
   } else {
     console.warn(
-      `[Scheduler] Schedule #${scheduleId} had playback errors; keeping in database for retry.`
+      `[Scheduler] Schedule #${scheduleId} had playback errors; keeping in database for retry (if not already deleted).`
     );
 
     emitEvent("schedule_failed", {
@@ -429,6 +442,13 @@ async function processScheduleQueue() {
     _scheduleQueue.sort((a, b) => new Date(a.datetime) - new Date(b.datetime));
 
     for (const schedule of _scheduleQueue) {
+      if (_forceAbortAll) {
+        console.log(
+          "[Scheduler] Force abort flag set, breaking out of schedule queue loop."
+        );
+        break;
+      }
+
       if (_claimed.has(schedule.id)) {
         console.log(
           `[Scheduler] Schedule #${schedule.id} already claimed, skipping`
@@ -457,8 +477,10 @@ async function processScheduleQueue() {
       }
     }
   } finally {
+    // After processing (or force abort), clear queue state
     _isProcessingQueue = false;
     _scheduleQueue = [];
+    _forceAbortAll = false;
   }
 }
 
@@ -524,6 +546,8 @@ export function stopScheduleRunner() {
   _paused = false;
   _cancelRequested = false;
   _skipRequested = false;
+  _forceAbortAll = false;
+  _runningJob = null;
   console.log("[Scheduler] Stopped");
 }
 
@@ -598,19 +622,30 @@ export async function resumeCurrentSchedule() {
 }
 
 export async function stopCurrentSchedule() {
-  if (!_runningJob) {
-    console.log("[Scheduler] stopCurrentSchedule: no running job");
+  // If nothing is running and nothing is processing, nothing to stop
+  if (!_runningJob && !_isProcessingQueue) {
+    console.log("[Scheduler] stopCurrentSchedule: no running job/queue");
     return false;
   }
 
-  const scheduleId = _runningJob.scheduleId;
-  const playlistId = _runningJob.playlistId;
+  const scheduleId = _runningJob?.scheduleId ?? null;
+  const playlistId = _runningJob?.playlistId ?? null;
+  const mediaId = _runningJob?.mediaId ?? null;
 
+  console.log(
+    "[Scheduler] stopCurrentSchedule called for schedule:",
+    scheduleId,
+    "playlist:",
+    playlistId
+  );
+
+  // Flags: tell loops to abort ASAP
   _cancelRequested = true;
   _paused = false;
   _skipRequested = false;
+  _forceAbortAll = true;
 
-  // 🔴 IMPORTANT: immediately stop Caspar playback on the schedule layer
+  // Immediately stop Caspar playback
   try {
     await casparStop(CHANNEL, LAYER);
   } catch (e) {
@@ -620,18 +655,52 @@ export async function stopCurrentSchedule() {
     );
   }
 
-  emitEvent("schedule_stop_requested", {
+  // Immediately remove schedule from DB if we know its ID
+  if (scheduleId != null) {
+    try {
+      await prisma.schedule.delete({ where: { id: Number(scheduleId) } });
+      console.log(
+        `[Scheduler] stopCurrentSchedule: schedule #${scheduleId} removed from database immediately.`
+      );
+    } catch (e) {
+      console.warn(
+        `[Scheduler] stopCurrentSchedule: could not delete schedule #${scheduleId}:`,
+        e?.message || e
+      );
+    }
+
+    // Clean up in-memory tracking for this schedule
+    _claimed.delete(scheduleId);
+    _scheduleQueue = _scheduleQueue.filter((s) => s.id !== scheduleId);
+  }
+
+  emitEvent("schedule_stopped", {
     scheduleId,
     playlistId,
-    mediaId: _runningJob.mediaId,
+    reason: "user_stop_force",
     timestamp: new Date(),
   });
 
-  // Return info so API callers can log which schedule was cancelled
+  emitEvent("schedule_deleted", {
+    scheduleId,
+    playlistId,
+    reason: "stopped",
+    timestamp: new Date(),
+  });
+
+  // Clear current job & media so tick() doesn't think something is running
+  _runningJob = null;
+  _currentPlayingMedia = null;
+  _currentMediaStartTime = null;
+
+  // Mark queue processing as done from the scheduler's POV
+  _isProcessingQueue = false;
+
   return {
     cancelled: true,
     scheduleId,
     playlistId,
+    mediaId,
   };
 }
 
