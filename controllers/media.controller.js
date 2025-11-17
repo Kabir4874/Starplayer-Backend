@@ -52,7 +52,7 @@ const upload = multer({
   },
 });
 
-export const uploadMiddleware = upload.array("files", 500);
+export const uploadMiddleware = upload.any();
 
 /* ─────────────────────── Controllers ─────────────────────── */
 

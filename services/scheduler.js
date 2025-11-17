@@ -492,7 +492,6 @@ async function tick() {
 
   const dueSchedules = await getDueSchedules();
   if (!dueSchedules.length) {
-    console.log("[Scheduler] No due schedules found");
     return;
   }
 
