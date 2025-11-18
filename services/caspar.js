@@ -34,7 +34,7 @@ class CasparCGSocket {
       this.socket.on("data", (data) => {
         const response = data.toString();
         this.responseBuffer += response;
-        console.log("📥 Received raw data:", response);
+        console.log("📥 Received raw data:");
 
         // Process complete lines from buffer
         const lines = this.responseBuffer.split("\r\n");
@@ -44,7 +44,7 @@ class CasparCGSocket {
 
         lines.forEach((line) => {
           if (line.trim()) {
-            console.log("📥 Processing line:", line);
+            console.log("📥 Processing line:");
             this.processResponseLine(line.trim());
           }
         });
@@ -80,7 +80,7 @@ class CasparCGSocket {
   }
 
   processResponseLine(line) {
-    console.log("🔍 Processing response line:", line);
+    console.log("🔍 Processing response line:");
 
     // Handle different response formats
     if (line.startsWith("RES")) {
@@ -113,15 +113,14 @@ class CasparCGSocket {
         this.responseCallbacks.delete(reqId);
       }
     } else if (line.startsWith("2")) {
-      // Handle immediate success responses (e.g., "202 PLAY OK")
-      console.log("🔍 Found immediate success response:", line);
+      console.log("🔍 Found immediate success response:");
       this.handleImmediateResponse(line);
     } else if (line.startsWith("4") || line.startsWith("5")) {
       // Handle immediate error responses
-      console.log("🔍 Found immediate error response:", line);
+      console.log("🔍 Found immediate error response:");
       this.handleImmediateResponse(line);
     } else {
-      console.log("🔍 Unknown response format, ignoring:", line);
+      console.log("🔍 Unknown response format, ignoring:");
     }
   }
 
@@ -149,7 +148,7 @@ class CasparCGSocket {
             raw: line,
             success: parts[0].startsWith("2"),
           };
-          console.log("🔍 Calling callback for immediate response:", reqId);
+          console.log("🔍 Calling callback for immediate response:");
           callback(responseObj);
           this.responseCallbacks.delete(reqId);
         }

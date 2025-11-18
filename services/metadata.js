@@ -4,43 +4,310 @@ import * as musicMetadata from "music-metadata";
 
 ffmpeg.setFfprobePath(ffprobeStatic.path);
 
+/* ───────────────────────── Helpers ───────────────────────── */
+
 /**
- * Parse filename to extract artist and title
- * Focused only on schema fields: author, title
+ * Check if a token looks like a website / downloader prefix.
+ * Examples caught: "SSYouTube.online", "yt1s.com", "y2mate.com"
+ */
+function isWebsiteToken(token) {
+  if (!token) return false;
+  const t = String(token).toLowerCase().trim();
+  if (!t) return false;
+
+  // Common downloaders / converters
+  const known = [
+    "ssyoutube.online",
+    "ssyoutube",
+    "yt1s.com",
+    "yt1s",
+    "y2mate.com",
+    "y2mate",
+    "tomp3",
+    "savefrom",
+  ];
+  if (known.includes(t)) return true;
+
+  // Generic domain pattern
+  if (/(?:www\.)?[a-z0-9-]+\.(?:com|net|org|online|info|co|io|xyz)$/.test(t)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Check if token is a "quality / tech" marker like 144p, 720p, HD, 4K, etc.
+ */
+function isQualityToken(token) {
+  if (!token) return false;
+  const t = String(token).toLowerCase();
+  return /\b(\d{3,4}p|[0-9]{3,4}x[0-9]{3,4}|4k|8k|hdr|uhd|hd|hq|1080i)\b/.test(
+    t
+  );
+}
+
+/**
+ * Check if token is a common music/show prefix that should be ignored
+ */
+function isNoiseToken(token) {
+  if (!token) return false;
+  const t = String(token).toLowerCase();
+  const noiseWords = [
+    "coke",
+    "studio",
+    "bangla",
+    "season",
+    "episode",
+    "ep",
+    "official",
+    "video",
+    "audio",
+    "lyrics",
+    "lyric",
+    "version",
+    "full",
+    "hd",
+    "officialvideo",
+    "officialaudio",
+  ];
+  return noiseWords.includes(t);
+}
+
+/**
+ * Remove bracketed stuff + "official video" etc + quality tags
+ * and collapse whitespace.
+ */
+function cleanTitleLikeString(str) {
+  if (!str) return str;
+  let r = String(str);
+
+  // Remove [brackets] and (parentheses)
+  r = r.replace(/\[[^\]]*\]/g, "");
+  r = r.replace(/\([^)]*\)/g, "");
+
+  // Remove common noise words
+  r = r.replace(
+    /\b(official\s*(video|audio|lyrics?|version)|lyric\s*video|music\s*video|full\s*video|audio\s*only)\b/gi,
+    ""
+  );
+
+  // Remove quality markers
+  r = r.replace(/\b(\d{3,4}p|4k|8k|hdr|uhd|hd|hq)\b/gi, "");
+
+  // Collapse spaces
+  r = r.replace(/\s+/g, " ").trim();
+  return r;
+}
+
+/**
+ * Parse filename to extract artist and title.
+ * Improved logic to handle various patterns including tail artists.
  */
 function parseFileName(filename) {
-  const baseName = filename.replace(/\.[^/.]+$/, ""); // Remove extension
+  const baseName = String(filename || "").replace(/\.[^/.]+$/, ""); // Remove extension
+
+  // Normalize spaces and special characters
+  let work = baseName.replace(/\s+/g, " ").trim();
+
+  // Replace multiple dashes with single dash
+  work = work.replace(/[-–—]+/g, " - ");
+
+  // Strip common website/downloader prefixes
+  work = work.replace(
+    /^(?:www\.)?(?:[a-z0-9-]+\.)+(?:com|net|org|online|info|co|io|xyz)\s*[_-]\s*/i,
+    ""
+  );
+  work = work.replace(
+    /^(ssyoutube(?:\.online)?|yt1s|y2mate|tomp3|savefrom)\s*[_-]\s*/i,
+    ""
+  );
 
   let author = null;
-  let title = baseName;
+  let title = work || baseName;
 
-  // Common patterns for "Author - Title"
-  const patterns = [
-    /^(.*?)\s*[-–—]\s*(.*?)$/, // "Author - Title"
-    /^(.*?)_(.*?)$/, // "Author_Title"
-  ];
+  const tokens = work.split(/\s+/).filter(Boolean);
+  const connectorRegex = /^(x|ft\.?|feat\.?|featuring|vs\.?|&)$/i;
 
-  for (const pattern of patterns) {
-    const match = baseName.match(pattern);
-    if (match) {
-      author = match[1]?.trim() || null;
-      title = match[2]?.trim() || baseName;
-      break;
+  // ── 1. "Artist - Title" (most common, keep first) ──────────────────────
+  let m = work.match(/^(.*?)\s*[-–—]\s*(.+)$/);
+  if (m) {
+    const potentialAuthor = m[1]?.trim() || "";
+    const potentialTitle = m[2]?.trim() || "";
+
+    // Only use this pattern if the author part doesn't look like a title
+    if (
+      !isNoiseToken(potentialAuthor.split(/\s+/)[0]) &&
+      potentialAuthor.length > 0 &&
+      potentialTitle.length > 0
+    ) {
+      author = potentialAuthor;
+      title = potentialTitle;
     }
   }
 
-  // Clean up common unwanted patterns
-  const cleanPatterns = [
-    /\[[^\]]*\]/g,
-    /\([^)]*\)/g,
-    /(official\s*(video|audio|lyrics?|version))/gi,
-    /(lyric\s*video)/gi,
-  ];
+  // ── 2. "Title ... Artist" pattern (for cases like your example) ────────
+  if (!author) {
+    // Look for connector tokens (x, ft, feat) to identify artist at the end
+    for (let i = tokens.length - 1; i >= 0; i--) {
+      if (connectorRegex.test(tokens[i])) {
+        // Found a connector, check if we have artist names around it
+        const artistStartIndex = findArtistStartIndex(tokens, i);
+        if (artistStartIndex !== -1 && artistStartIndex > 0) {
+          author = tokens.slice(artistStartIndex).join(" ").trim();
+          title = tokens.slice(0, artistStartIndex).join(" ").trim();
+          break;
+        }
+      }
+    }
+  }
 
-  title = title.replace(cleanPatterns[0], "");
-  title = title.replace(/\s+/g, " ").trim();
+  // ── 3. "Artist_Title" but avoid website prefixes on the left ───────────
+  if (!author) {
+    m = work.match(/^(.*?)_(.+)$/);
+    if (m) {
+      const left = m[1]?.trim() || "";
+      const right = m[2]?.trim() || "";
+      if (isWebsiteToken(left)) {
+        title = right || work;
+      } else {
+        author = left || null;
+        title = right || work;
+      }
+    }
+  }
+
+  // ── 4. Fallback: Try to extract artist from known patterns ─────────────
+  if (!author) {
+    // Look for any connector in the entire string
+    for (let i = 0; i < tokens.length; i++) {
+      if (connectorRegex.test(tokens[i])) {
+        const artistStartIndex = findArtistStartIndex(tokens, i);
+        if (artistStartIndex !== -1) {
+          author = tokens.slice(artistStartIndex).join(" ").trim();
+          title = tokens.slice(0, artistStartIndex).join(" ").trim();
+          break;
+        }
+      }
+    }
+  }
+
+  // Clean up the results
+  title = cleanTitleLikeString(title || baseName);
+  if (!title) {
+    title = cleanTitleLikeString(baseName) || baseName;
+  }
+
+  // If we still don't have an author, use a more aggressive approach
+  if (!author) {
+    author = extractArtistFromTitle(title) || "Unknown Artist";
+    if (author !== "Unknown Artist") {
+      // Remove the artist name from title if we found it
+      const artistRegex = new RegExp(
+        author.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+        "i"
+      );
+      title = cleanTitleLikeString(title.replace(artistRegex, ""));
+    }
+  }
 
   return { author, title };
+}
+
+/**
+ * Helper to find where the artist name starts in token array
+ */
+function findArtistStartIndex(tokens, connectorIndex) {
+  // Look backwards for the start of artist name
+  let start = connectorIndex;
+  let hasNameBefore = false;
+  let hasNameAfter = false;
+
+  // Check if there's a name before the connector
+  if (connectorIndex > 0) {
+    const tokenBefore = tokens[connectorIndex - 1];
+    if (isNameLikeToken(tokenBefore) && !isNoiseToken(tokenBefore)) {
+      hasNameBefore = true;
+      start = connectorIndex - 1;
+    }
+  }
+
+  // Check if there's a name after the connector
+  if (connectorIndex < tokens.length - 1) {
+    const tokenAfter = tokens[connectorIndex + 1];
+    if (isNameLikeToken(tokenAfter) && !isNoiseToken(tokenAfter)) {
+      hasNameAfter = true;
+    }
+  }
+
+  // If we have names around connector, expand to find full artist name
+  if (hasNameBefore || hasNameAfter) {
+    // Expand backwards
+    while (
+      start > 0 &&
+      isNameLikeToken(tokens[start - 1]) &&
+      !isNoiseToken(tokens[start - 1])
+    ) {
+      start--;
+    }
+
+    // Expand forwards to include the full artist name
+    let end = Math.min(connectorIndex + 2, tokens.length - 1);
+    while (
+      end < tokens.length - 1 &&
+      isNameLikeToken(tokens[end + 1]) &&
+      !isNoiseToken(tokens[end + 1])
+    ) {
+      end++;
+    }
+
+    return start;
+  }
+
+  return -1;
+}
+
+/**
+ * Check if token looks like a name
+ */
+function isNameLikeToken(token) {
+  if (!token) return false;
+  const t = String(token);
+
+  // Single letter tokens are usually not names (except initials)
+  if (t.length === 1 && !/[A-Z]/.test(t)) return false;
+
+  // Common noise words
+  if (isNoiseToken(t)) return false;
+
+  // Quality tokens
+  if (isQualityToken(t)) return false;
+
+  // Looks like capitalized name or has typical name pattern
+  return (
+    /^[A-ZÀ-Ý][a-zà-ÿ'.-]*$/.test(t) ||
+    /^[A-Z]{2,}$/.test(t) ||
+    /^[a-z]+$/.test(t)
+  ); // Allow lowercase names too
+}
+
+/**
+ * Extract artist name from title using common patterns
+ */
+function extractArtistFromTitle(title) {
+  const tokens = title.split(/\s+/);
+  const connectorRegex = /^(x|ft\.?|feat\.?|featuring|vs\.?|&)$/i;
+
+  // Look for connector patterns
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    if (connectorRegex.test(tokens[i])) {
+      const artistStartIndex = findArtistStartIndex(tokens, i);
+      if (artistStartIndex !== -1) {
+        return tokens.slice(artistStartIndex).join(" ").trim();
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -243,7 +510,7 @@ export async function probeFile(filePath, originalName) {
       console.warn("ffprobe failed:", error.message);
     }
 
-    // Parse filename for basic info
+    // Parse filename for basic info (our improved heuristics)
     const fileInfo = parseFileName(originalName);
 
     // Extract duration from available sources
@@ -254,20 +521,31 @@ export async function probeFile(filePath, originalName) {
       durationSec = extractDuration(ffprobeMeta.duration);
     }
 
-    // Extract author/artist
-    let author = fileInfo.author || "Unknown Artist";
+    // Extract author/artist - prioritize metadata over filename parsing
+    let author = null;
     if (musicMeta?.common?.artist) {
       author = musicMeta.common.artist;
     } else if (ffprobeMeta?.artist) {
       author = ffprobeMeta.artist;
     }
 
-    // Extract title
-    let title = fileInfo.title || originalName.replace(/\.[^/.]+$/, "");
+    // Use filename parsing only if metadata didn't provide artist
+    if (!author || author === "Unknown Artist") {
+      author = fileInfo.author || "Unknown Artist";
+    }
+
+    // Extract title - prioritize metadata over filename parsing
+    let title = null;
     if (musicMeta?.common?.title) {
-      title = musicMeta.common.title;
+      title = cleanTitleLikeString(musicMeta.common.title);
     } else if (ffprobeMeta?.title) {
-      title = ffprobeMeta.title;
+      title = cleanTitleLikeString(ffprobeMeta.title);
+    }
+
+    // Use filename parsing only if metadata didn't provide title
+    if (!title) {
+      title =
+        fileInfo.title || originalName.replace(/\.[^/.]+$/, "") || originalName;
     }
 
     // Extract year
