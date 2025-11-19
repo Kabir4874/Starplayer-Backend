@@ -31,7 +31,7 @@ function normalizeType(raw) {
 
 const upload = multer({
   dest: path.join(process.cwd(), "src", "uploads"),
-  limits: { fileSize: 1024 * 1024 * 1024 },
+  limits: { fileSize: 11 * 1024 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedMimes = [
       "audio/mpeg",
@@ -56,11 +56,6 @@ export const uploadMiddleware = upload.any();
 
 /* ─────────────────────── Controllers ─────────────────────── */
 
-/**
- * POST /api/media - Upload media files with automatic metadata extraction
- * Robust duplicate prevention (content hash + normalized name)
- * Uses Media.type only (SONG/JINGLE/SPOT), no separate category.
- */
 export async function addMedia(req, res, next) {
   const files = req.files || [];
 
@@ -281,24 +276,15 @@ export async function addMedia(req, res, next) {
   }
 }
 
-/**
- * GET /api/media - List all media with filtering
- * Filtering is based on Media.type (SONG/JINGLE/SPOT) and language, etc.
- */
 export async function listMedia(req, res, next) {
   try {
     const {
-      page = 1,
-      limit = 50,
-      type, // SONG/JINGLE/SPOT
+      type,
       language,
       search,
       sortBy = "uploadDate",
       sortOrder = "desc",
     } = req.query;
-
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    const take = parseInt(limit);
 
     const where = {};
 
@@ -324,20 +310,15 @@ export async function listMedia(req, res, next) {
     const orderBy = {};
     orderBy[sortBy] = sortOrder;
 
-    const [media, total] = await Promise.all([
-      prisma.media.findMany({ where, orderBy, skip, take }),
-      prisma.media.count({ where }),
-    ]);
+    const media = await prisma.media.findMany({
+      where,
+      orderBy,
+    });
 
     res.json({
       ok: true,
       items: media,
-      pagination: {
-        page: parseInt(page),
-        limit: take,
-        total,
-        pages: Math.ceil(total / take),
-      },
+      total: media.length,
     });
   } catch (error) {
     next(error);
