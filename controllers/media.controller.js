@@ -3,6 +3,7 @@ import multer from "multer";
 import path from "path";
 import { cfg } from "../config/config.js";
 import {
+  burnInArtistTitle,
   calculateFileHash,
   moveToCasparMedia,
   normalizeStem,
@@ -77,11 +78,11 @@ export async function addMedia(req, res, next) {
     };
 
     // ── Build duplicate detection caches ─────────────────────
-    const existingHashes = new Set(); // content hashes
+    const existingHashes = new Set(); // content hashes (for this upload batch only)
     const existingNamesLower = new Set(); // exact file names (lower)
     const existingStems = new Set(); // normalized stems
 
-    // DB filenames
+    // DB filenames (use this as the single source of truth for existing library)
     const allMedia = await prisma.media.findMany({
       select: { fileName: true },
     });
@@ -92,40 +93,16 @@ export async function addMedia(req, res, next) {
       existingStems.add(normalizeStem(fn));
     }
 
-    // FS filenames + content hashes
-    try {
-      await fse.ensureDir(cfg.mediaDir);
-      const mediaFiles = await fse.readdir(cfg.mediaDir);
-      for (const fileName of mediaFiles) {
-        try {
-          const filePath = path.join(cfg.mediaDir, fileName);
-          const stat = await fse.stat(filePath);
-          if (!stat.isFile()) continue;
-
-          // name caches
-          existingNamesLower.add(fileName.toLowerCase());
-          existingStems.add(normalizeStem(fileName));
-
-          // content hash
-          const fileHash = await calculateFileHash(filePath);
-          existingHashes.add(fileHash);
-        } catch (error) {
-          console.warn(
-            `Could not process existing file ${fileName}:`,
-            error.message
-          );
-        }
-      }
-    } catch (error) {
-      console.warn("Error loading media directory for dedupe:", error.message);
-    }
+    // NOTE: we intentionally DO NOT hash the entire media directory here
+    // anymore – that was too slow for large libraries. We only hash
+    // new uploads (below) and use DB for existing-name checks.
 
     // ── Process uploads ──────────────────────────────────────
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
 
       try {
-        // Compute temp file hash once (authoritative dedupe)
+        // Compute temp file hash once (authoritative dedupe within this batch)
         let tmpHash = null;
         try {
           tmpHash = await calculateFileHash(file.path);
@@ -137,13 +114,13 @@ export async function addMedia(req, res, next) {
         const originalLower = String(file.originalname || "").toLowerCase();
         const originalStem = normalizeStem(file.originalname);
 
-        // Check A: exact name already in DB/FS (case-insensitive)
+        // Check A: exact name already in DB (case-insensitive) or already in this batch
         const nameExists = existingNamesLower.has(originalLower);
 
         // Check B: normalized stem already present (handles "My Song.mp3" vs "my_song.MP3")
         const stemExists = existingStems.has(originalStem);
 
-        // Check C: content hash duplicate
+        // Check C: content hash duplicate (within this batch only)
         const contentExists = tmpHash ? existingHashes.has(tmpHash) : false;
 
         if (contentExists || nameExists || stemExists) {
@@ -151,9 +128,12 @@ export async function addMedia(req, res, next) {
           await fse.remove(file.path).catch(() => {});
 
           let reason = "Duplicate detected";
-          if (contentExists) reason = "Duplicate content (hash match)";
-          else if (nameExists) reason = "Duplicate filename";
-          else if (stemExists) reason = "Duplicate name (normalized)";
+          if (contentExists)
+            reason = "Duplicate content (hash match within batch)";
+          else if (nameExists)
+            reason = "Duplicate filename (already in library)";
+          else if (stemExists)
+            reason = "Duplicate name (normalized, already in library)";
 
           results.push({
             ok: false,
@@ -187,6 +167,19 @@ export async function addMedia(req, res, next) {
 
         // Probe from final location
         const meta = await probeFile(absolutePath, file.originalname);
+
+        // ▶ Burn artist/title into video (bottom-left, two lines).
+        //   This is fire-and-forget so it doesn't slow down the upload.
+        burnInArtistTitle(
+          absolutePath,
+          { author: meta.author, title: meta.title },
+          newFileName
+        ).catch((overlayErr) => {
+          console.warn(
+            `Overlay failed for ${newFileName}:`,
+            overlayErr?.message || overlayErr
+          );
+        });
 
         // Missing fields aggregation
         meta.missing.forEach((field) => {
