@@ -5,6 +5,7 @@ import fse from "fs-extra";
 import mime from "mime-types";
 import path from "path";
 import { cfg } from "../config/config.js";
+import { enqueueFfmpeg } from "./ffmpegQueue.js";
 
 let ffmpegPath = null;
 
@@ -27,9 +28,6 @@ if (ffmpegPath) {
 
 /* ───────────────────────── Hash / file helpers ───────────────────────── */
 
-/**
- * Calculate file hash (MD5) to detect duplicate content
- */
 export async function calculateFileHash(filePath) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash("md5");
@@ -177,6 +175,10 @@ async function getDefaultFontFile() {
   return null;
 }
 
+/**
+ * Overlay artist/title text on video files.
+ * Uses a global ffmpeg queue so we never run too many ffmpeg processes at once.
+ */
 export async function burnInArtistTitle(
   absolutePath,
   { author, title } = {},
@@ -233,10 +235,10 @@ export async function burnInArtistTitle(
     const filterParts = [scalePad];
 
     if (escapedArtist && escapedTitle) {
-      // Two lines close together near bottom-left (11–12% of height total)
+      // Two lines close together near bottom-left (approx bottom 12% of screen)
       filterParts.push(
-        `drawtext=${commonTextOpts}:text='${escapedArtist}':x=20:y=720-88`, // y ≈ 632
-        `drawtext=${commonTextOpts}:text='${escapedTitle}':x=20:y=720-48` // y ≈ 672
+        `drawtext=${commonTextOpts}:text='${escapedArtist}':x=20:y=720-88`,
+        `drawtext=${commonTextOpts}:text='${escapedTitle}':x=20:y=720-48`
       );
     } else {
       // Only one line (artist or title or fallback)
@@ -260,40 +262,45 @@ export async function burnInArtistTitle(
       filter: fullFilter,
     });
 
-    // 🔥 Fire-and-forget: do NOT await ffmpeg completion, so uploads return fast
-    ffmpeg(absolutePath)
-      .videoFilters(fullFilter)
-      .outputOptions(["-c:a copy"]) // keep original audio
-      .output(tmpOut)
-      .on("start", (cmd) => {
-        console.log("[FFMPEG] Command:", cmd);
-      })
-      .on("error", (err, stdout, stderr) => {
-        console.error("[FFMPEG] Overlay error:", err?.message || err);
-        if (stderr) console.error("[FFMPEG] STDERR:", stderr);
-        // Clean partial file if exists
-        fse.remove(tmpOut).catch(() => {});
-      })
-      .on("end", async () => {
-        try {
-          // Replace original file with the overlaid one
-          await fse.move(tmpOut, absolutePath, { overwrite: true });
-          console.log("[FFMPEG] Overlay complete, file replaced.");
-        } catch (moveErr) {
-          console.error(
-            "[FFMPEG] Failed to replace original file with overlay:",
-            moveErr?.message || moveErr
-          );
-          // If move failed, try to remove tmpOut to avoid clutter
-          fse.remove(tmpOut).catch(() => {});
-        }
-      })
-      .run();
-
-    // Function returns immediately here (no blocking on ffmpeg)
-    return;
+    // ✅ IMPORTANT: run the ffmpeg job inside the queue
+    await enqueueFfmpeg(
+      () =>
+        new Promise((resolve) => {
+          ffmpeg(absolutePath)
+            .videoFilters(fullFilter)
+            .outputOptions(["-c:a copy"]) // keep original audio
+            .output(tmpOut)
+            .on("start", (cmd) => {
+              console.log("[FFMPEG] Command:", cmd);
+            })
+            .on("error", (err, stdout, stderr) => {
+              console.error("[FFMPEG] Overlay error:", err?.message || err);
+              if (stderr) console.error("[FFMPEG] STDERR:", stderr);
+              // Clean partial file if exists
+              fse.remove(tmpOut).catch(() => {});
+              // We resolve even on error so the queue continues
+              resolve();
+            })
+            .on("end", async () => {
+              try {
+                // Replace original file with the overlaid one
+                await fse.move(tmpOut, absolutePath, { overwrite: true });
+                console.log("[FFMPEG] Overlay complete, file replaced.");
+              } catch (moveErr) {
+                console.error(
+                  "[FFMPEG] Failed to replace original file with overlay:",
+                  moveErr?.message || moveErr
+                );
+                // If move failed, try to remove tmpOut to avoid clutter
+                fse.remove(tmpOut).catch(() => {});
+              } finally {
+                resolve();
+              }
+            })
+            .run();
+        })
+    );
   } catch (error) {
     console.error("[FFMPEG] Failed to burn artist/title overlay:", error);
-    // If anything goes wrong, do NOT break upload flow
   }
 }

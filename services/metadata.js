@@ -423,20 +423,59 @@ function extractBPM(metadataBPM) {
 }
 
 /**
- * Extract duration and round to seconds
+ * Convert duration-like value (number or string) into seconds.
+ * Accepts:
+ *   - number (seconds)
+ *   - "123.45"
+ *   - "00:03:45.12" or "3:45"
  */
-function extractDuration(duration) {
-  if (!duration) return 0;
-  return Math.round(duration);
+function extractDuration(raw) {
+  if (!raw && raw !== 0) return 0;
+
+  // numeric
+  if (typeof raw === "number") {
+    if (!isFinite(raw) || raw <= 0) return 0;
+    return Math.round(raw);
+  }
+
+  const s = String(raw).trim();
+  if (!s) return 0;
+
+  // plain number in string
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const num = parseFloat(s);
+    if (!isNaN(num) && num > 0) return Math.round(num);
+    return 0;
+  }
+
+  // time string "HH:MM:SS(.ms)" or "MM:SS"
+  const parts = s.split(":").map((p) => p.trim());
+  if (parts.length >= 2 && parts.length <= 3) {
+    let sec = 0;
+    if (parts.length === 3) {
+      const h = parseFloat(parts[0]) || 0;
+      const m = parseFloat(parts[1]) || 0;
+      const sp = parseFloat(parts[2]) || 0;
+      sec = h * 3600 + m * 60 + sp;
+    } else if (parts.length === 2) {
+      const m = parseFloat(parts[0]) || 0;
+      const sp = parseFloat(parts[1]) || 0;
+      sec = m * 60 + sp;
+    }
+    if (sec > 0) return Math.round(sec);
+  }
+
+  return 0;
 }
 
 /**
- * Extract metadata using ffprobe
+ * Extract metadata using ffprobe (very defensive for duration).
  */
 function extractMetadataWithFFprobe(filePath) {
   return new Promise((resolve) => {
     ffmpeg.ffprobe(filePath, (err, data) => {
       if (err || !data) {
+        console.warn("ffprobe failed:", err?.message || err);
         resolve(null);
         return;
       }
@@ -470,8 +509,35 @@ function extractMetadataWithFFprobe(filePath) {
         return null;
       };
 
+      // ── duration (VERY IMPORTANT) ───────────────────────────
+      let durationRaw = format.duration;
+
+      // fallback: check each stream.duration
+      if (
+        (!durationRaw || Number(durationRaw) <= 0) &&
+        Array.isArray(streams)
+      ) {
+        for (const s of streams) {
+          if (s && s.duration && Number(s.duration) > 0) {
+            durationRaw = s.duration;
+            break;
+          }
+        }
+      }
+
+      // fallback: some files store duration as a tag like "00:03:45.12"
+      if (
+        (!durationRaw || Number(durationRaw) <= 0) &&
+        mergedTags &&
+        (mergedTags.DURATION || mergedTags.duration)
+      ) {
+        durationRaw = mergedTags.DURATION || mergedTags.duration;
+      }
+
+      const duration = extractDuration(durationRaw);
+
       resolve({
-        duration: format.duration,
+        duration,
         bitrate: format.bitrate,
         title: getTag(["title", "TITLE"]),
         artist: getTag(["artist", "ARTIST", "author", "ALBUM_ARTIST"]),
@@ -507,7 +573,7 @@ export async function probeFile(filePath, originalName) {
     try {
       ffprobeMeta = await extractMetadataWithFFprobe(filePath);
     } catch (error) {
-      console.warn("ffprobe failed:", error.message);
+      console.warn("ffprobe extractMetadataWithFFprobe failed:", error.message);
     }
 
     // Parse filename for basic info (our improved heuristics)
@@ -518,6 +584,11 @@ export async function probeFile(filePath, originalName) {
     if (musicMeta?.format?.duration) {
       durationSec = extractDuration(musicMeta.format.duration);
     } else if (ffprobeMeta?.duration) {
+      durationSec = extractDuration(ffprobeMeta.duration);
+    }
+
+    // If still zero, try one more time from ffprobe's raw data (very defensive)
+    if (!durationSec && ffprobeMeta && ffprobeMeta.duration) {
       durationSec = extractDuration(ffprobeMeta.duration);
     }
 
