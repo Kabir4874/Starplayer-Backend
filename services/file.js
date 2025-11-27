@@ -204,9 +204,13 @@ export async function burnInArtistTitle(
     let artistLine = author ? String(author) : "";
     let titleLine = title ? String(title) : "";
 
+    // 🔧 FIX: remove underscores from overlay text, trim extra spaces
+    artistLine = artistLine.replace(/_/g, " ").trim();
+    titleLine = titleLine.replace(/_/g, " ").trim();
+
     if (!artistLine && !titleLine && fallbackName) {
       const base = path.basename(fallbackName, path.extname(fallbackName));
-      titleLine = base; // use filename as single line
+      titleLine = base.replace(/_/g, " ").trim(); // also clean underscores here
     }
 
     if (!artistLine && !titleLine) return;
@@ -235,16 +239,16 @@ export async function burnInArtistTitle(
     const filterParts = [scalePad];
 
     if (escapedArtist && escapedTitle) {
-      // Two lines close together near bottom-left (approx bottom 12% of screen)
+      // 🔼 ARTIST on top line, TITLE on second line, TOP-LEFT
       filterParts.push(
-        `drawtext=${commonTextOpts}:text='${escapedArtist}':x=20:y=720-88`,
-        `drawtext=${commonTextOpts}:text='${escapedTitle}':x=20:y=720-48`
+        `drawtext=${commonTextOpts}:text='${escapedArtist}':x=20:y=40`,
+        `drawtext=${commonTextOpts}:text='${escapedTitle}':x=20:y=80`
       );
     } else {
       // Only one line (artist or title or fallback)
       const singleLine = escapedArtist || escapedTitle;
       filterParts.push(
-        `drawtext=${commonTextOpts}:text='${singleLine}':x=20:y=720-60`
+        `drawtext=${commonTextOpts}:text='${singleLine}':x=20:y=60`
       );
     }
 

@@ -1,6 +1,64 @@
 // src/controllers/schedule.controller.js
 import { prisma } from "../services/prisma.js";
 
+/* ───────────────────────── Helpers ───────────────────────── */
+
+/**
+ * Same serializer as playlist.controller (duplicated here to avoid extra imports).
+ */
+function serializePlaylistForClient(playlist) {
+  const items = (playlist.playlistItems || []).map((item) => {
+    const isRandom = item.kind === "RANDOM" || (!item.media && item.randomType);
+    if (isRandom) {
+      return {
+        id: null,
+        kind: "RANDOM",
+        isRandom: true,
+        randomType: item.randomType || null,
+        order: item.order,
+        type: item.randomType || null,
+        author: null,
+        title: null,
+        year: null,
+        fileName: null,
+        duration: null,
+        language: null,
+        bpm: null,
+      };
+    }
+
+    const m = item.media;
+    return {
+      id: m.id,
+      kind: item.kind || "FIXED",
+      isRandom: false,
+      randomType: null,
+      order: item.order,
+      type: m.type,
+      author: m.author,
+      title: m.title,
+      year: m.year,
+      fileName: m.fileName,
+      duration: m.duration,
+      language: m.language,
+      bpm: m.bpm,
+    };
+  });
+
+  return {
+    id: playlist.id,
+    title: playlist.title,
+    mediaIds: (playlist.playlistItems || [])
+      .filter((it) => it.kind === "FIXED" && it.mediaId != null)
+      .map((it) => it.mediaId),
+    items,
+    createdAt: playlist.createdAt,
+    updatedAt: playlist.updatedAt,
+  };
+}
+
+/* ───────────────────────── Controllers ───────────────────────── */
+
 /**
  * GET /api/schedules - Get all schedules (with slim playlist info)
  */
@@ -33,7 +91,9 @@ export async function listSchedules(req, res, next) {
       playlist: {
         id: schedule.playlist.id,
         title: schedule.playlist.title,
-        mediaIds: schedule.playlist.playlistItems.map((item) => item.mediaId),
+        mediaIds: (schedule.playlist.playlistItems || [])
+          .filter((it) => it.kind === "FIXED" && it.mediaId != null)
+          .map((it) => it.mediaId),
       },
     }));
 
@@ -61,8 +121,7 @@ export async function createSchedule(req, res, next) {
       });
     }
 
-    // Validate playlist
-    const pid = parseInt(playlistId);
+    const pid = parseInt(playlistId, 10);
     if (Number.isNaN(pid)) {
       return res.status(400).json({
         ok: false,
@@ -80,9 +139,8 @@ export async function createSchedule(req, res, next) {
       });
     }
 
-    // Validate datetime
     const dt = new Date(datetime);
-    if (isNaN(dt.getTime())) {
+    if (Number.isNaN(dt.getTime())) {
       return res.status(400).json({
         ok: false,
         message: "Invalid datetime",
@@ -115,7 +173,9 @@ export async function createSchedule(req, res, next) {
       playlist: {
         id: schedule.playlist.id,
         title: schedule.playlist.title,
-        mediaIds: schedule.playlist.playlistItems.map((item) => item.mediaId),
+        mediaIds: (schedule.playlist.playlistItems || [])
+          .filter((it) => it.kind === "FIXED" && it.mediaId != null)
+          .map((it) => it.mediaId),
       },
     };
 
@@ -134,7 +194,7 @@ export async function createSchedule(req, res, next) {
  */
 export async function deleteSchedule(req, res, next) {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(req.params.id, 10);
 
     if (Number.isNaN(id)) {
       return res
@@ -197,22 +257,7 @@ export async function getUpcomingSchedules(req, res, next) {
       id: schedule.id,
       playlistId: schedule.playlistId,
       datetime: schedule.datetime,
-      playlist: {
-        id: schedule.playlist.id,
-        title: schedule.playlist.title,
-        mediaIds: schedule.playlist.playlistItems.map((item) => item.mediaId),
-        items: schedule.playlist.playlistItems.map((item) => ({
-          id: item.media.id,
-          type: item.media.type,
-          author: item.media.author,
-          title: item.media.title,
-          year: item.media.year,
-          fileName: item.media.fileName,
-          duration: item.media.duration,
-          language: item.media.language,
-          bpm: item.media.bpm,
-        })),
-      },
+      playlist: serializePlaylistForClient(schedule.playlist),
     }));
 
     res.json({
@@ -231,7 +276,7 @@ export async function getUpcomingSchedules(req, res, next) {
  */
 export async function updateSchedule(req, res, next) {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(req.params.id, 10);
     const { playlistId, datetime } = req.body;
 
     if (Number.isNaN(id)) {
@@ -240,17 +285,15 @@ export async function updateSchedule(req, res, next) {
         .json({ ok: false, message: "Invalid schedule id" });
     }
 
-    // Ensure the schedule exists
     const existing = await prisma.schedule.findUnique({ where: { id } });
     if (!existing) {
       return res.status(404).json({ ok: false, message: "Schedule not found" });
     }
 
-    // Build update data
     const data = {};
 
-    if (playlistId !== undefined) {
-      const pid = parseInt(playlistId);
+    if (playlistId !== undefined && playlistId !== null) {
+      const pid = parseInt(playlistId, 10);
       if (Number.isNaN(pid)) {
         return res
           .status(400)
@@ -265,9 +308,9 @@ export async function updateSchedule(req, res, next) {
       data.playlistId = pid;
     }
 
-    if (datetime !== undefined) {
+    if (datetime !== undefined && datetime !== null) {
       const dt = new Date(datetime);
-      if (isNaN(dt.getTime())) {
+      if (Number.isNaN(dt.getTime())) {
         return res.status(400).json({ ok: false, message: "Invalid datetime" });
       }
       data.datetime = dt;
@@ -299,22 +342,7 @@ export async function updateSchedule(req, res, next) {
       id: schedule.id,
       playlistId: schedule.playlistId,
       datetime: schedule.datetime,
-      playlist: {
-        id: schedule.playlist.id,
-        title: schedule.playlist.title,
-        mediaIds: schedule.playlist.playlistItems.map((item) => item.mediaId),
-        items: schedule.playlist.playlistItems.map((item) => ({
-          id: item.media.id,
-          type: item.media.type,
-          author: item.media.author,
-          title: item.media.title,
-          year: item.media.year,
-          fileName: item.media.fileName,
-          duration: item.media.duration,
-          language: item.media.language,
-          bpm: item.media.bpm,
-        })),
-      },
+      playlist: serializePlaylistForClient(schedule.playlist),
     };
 
     res.json({

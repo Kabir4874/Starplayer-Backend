@@ -21,6 +21,11 @@ enum Language {
   OTHER
 }
 
+enum PlaylistItemKind {
+  FIXED
+  RANDOM
+}
+
 model Media {
   id         Int       @id @default(autoincrement())
   type       MediaType
@@ -54,12 +59,14 @@ model Playlist {
 }
 
 model PlaylistItem {
-  id         Int      @id @default(autoincrement())
-  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  id         Int              @id @default(autoincrement())
+  playlist   Playlist         @relation(fields: [playlistId], references: [id], onDelete: Cascade)
   playlistId Int
-  media      Media    @relation(fields: [mediaId], references: [id], onDelete: Cascade)
-  mediaId    Int
+  media      Media?           @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  mediaId    Int?
   order      Int
+  kind       PlaylistItemKind @default(FIXED)
+  randomType MediaType?
 
   @@unique([playlistId, order])
   @@index([playlistId])

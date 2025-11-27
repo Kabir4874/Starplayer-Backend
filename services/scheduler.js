@@ -1,5 +1,6 @@
 // src/services/scheduler.js
 import { casparPause, casparPlay, casparResume, casparStop } from "./caspar.js";
+import { resolvePlaylistForSchedule } from "./playlistRandomResolver.js"; // NEW
 import { prisma } from "./prisma.js";
 
 const CHANNEL = 1;
@@ -97,14 +98,34 @@ async function getDueSchedules() {
   });
 }
 
+/**
+ * Build the playlist queue for this run of the schedule.
+ *
+ * Uses resolvePlaylistForSchedule so RANDOM placeholders are converted
+ * to actual Media rows at *run time*.
+ *
+ * Returns an array of "media-like" objects:
+ *   {
+ *     ...media,
+ *     playlistItemId,
+ *     playlistItemKind: "FIXED" | "RANDOM",
+ *     randomType: "SONG" | "JINGLE" | "SPOT" | null
+ *   }
+ */
 async function getPlaylistQueue(playlistId) {
-  const items = await prisma.playlistItem.findMany({
-    where: { playlistId: Number(playlistId) },
-    orderBy: { order: "asc" },
-    include: { media: true },
-  });
+  const resolved = await resolvePlaylistForSchedule(Number(playlistId));
 
-  const queue = items.map((it) => it.media).filter((m) => m && m.fileName);
+  const queue = resolved
+    .map((r) => {
+      if (!r.media || !r.media.fileName) return null;
+      return {
+        ...r.media,
+        playlistItemId: r.playlistItemId,
+        playlistItemKind: r.kind,
+        randomType: r.randomType || null,
+      };
+    })
+    .filter(Boolean);
 
   return queue;
 }
