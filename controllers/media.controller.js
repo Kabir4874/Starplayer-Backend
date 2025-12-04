@@ -30,7 +30,7 @@ function normalizeType(raw) {
 /* ───────────────────────── Multer ───────────────────────── */
 
 const upload = multer({
-  dest: path.join(process.cwd(), "src", "uploads"),
+  dest: cfg.mediaDir, // ← temp file goes directly into media folder
   // per-file limit (11 GB)
   limits: { fileSize: 11 * 1024 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
