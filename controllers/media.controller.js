@@ -2,11 +2,7 @@ import fse from "fs-extra";
 import multer from "multer";
 import path from "path";
 import { cfg } from "../config/config.js";
-import {
-  burnInArtistTitle,
-  moveToCasparMedia,
-  normalizeStem,
-} from "../services/file.js";
+import { moveToCasparMedia, normalizeStem } from "../services/file.js";
 import { probeFile } from "../services/metadata.js";
 import { prisma } from "../services/prisma.js";
 
@@ -161,17 +157,7 @@ export async function addMedia(req, res, next) {
           },
         });
 
-        // Fire-and-forget overlay for videos; doesn't block upload
-        burnInArtistTitle(
-          absolutePath,
-          { author: meta.author, title: meta.title },
-          newFileName
-        ).catch((overlayErr) => {
-          console.warn(
-            `Overlay failed for ${newFileName}:`,
-            overlayErr?.message || overlayErr
-          );
-        });
+        // Note: Artist/title overlay will be handled by CasparCG during playback
 
         results.push({
           ok: true,
@@ -275,10 +261,50 @@ export async function listMedia(req, res, next) {
       orderBy,
     });
 
+    // Filter out records whose files are missing on disk (prevents ghost rows)
+    const existing = [];
+    const missingIds = [];
+
+    if (cfg.mediaDir) {
+      await Promise.all(
+        media.map(async (m) => {
+          const filePath = path.join(cfg.mediaDir, m.fileName);
+          const exists = await fse.pathExists(filePath);
+          if (exists) {
+            existing.push(m);
+          } else {
+            missingIds.push(m.id);
+          }
+        })
+      );
+    } else {
+      // If mediaDir not configured, keep original list but warn
+      console.warn(
+        "[MEDIA] cfg.mediaDir is not set; cannot validate missing files."
+      );
+      existing.push(...media);
+    }
+
+    // Soft-clean DB if there are ghost rows pointing to missing files
+    if (missingIds.length) {
+      try {
+        await prisma.media.deleteMany({ where: { id: { in: missingIds } } });
+        console.warn(
+          `[MEDIA] Cleaned ${missingIds.length} ghost record(s) with missing files.`
+        );
+      } catch (cleanErr) {
+        console.warn(
+          "[MEDIA] Failed to clean ghost records:",
+          cleanErr?.message || cleanErr
+        );
+      }
+    }
+
     res.json({
       ok: true,
-      items: media,
-      total: media.length,
+      items: existing,
+      total: existing.length,
+      cleanedGhosts: missingIds.length,
     });
   } catch (error) {
     next(error);

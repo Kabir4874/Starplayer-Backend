@@ -7,6 +7,7 @@ import {
   casparClearLayer,
   casparDiagnostics,
   casparHelp,
+  casparHideOverlay,
   casparInfo,
   casparInfoTemplate,
   casparKill,
@@ -17,6 +18,7 @@ import {
   casparPlayTemplate,
   casparResume,
   casparSetChannelFormat,
+  casparShowOverlay,
   casparStop,
   casparVersion,
   getCasparStatus,
@@ -44,8 +46,19 @@ function parseBoolean(v, dflt = false) {
 // Media Playback Controllers
 export async function play(req, res, next) {
   try {
-    let { fileName, id, channel, layer, loop, auto, seek, length, filter } =
-      req.body || {};
+    let {
+      fileName,
+      id,
+      channel,
+      layer,
+      loop,
+      auto,
+      seek,
+      length,
+      filter,
+      showOverlay = true,
+      overlayLayer,
+    } = req.body || {};
 
     // 🚫 CANCEL CURRENT SCHEDULE IF RUNNING (manual override)
     try {
@@ -62,12 +75,20 @@ export async function play(req, res, next) {
       );
     }
 
-    // Resolve filename by id if needed
+    // Resolve filename by id if needed and fetch metadata
+    let mediaRecord = null;
     if (!fileName && id != null) {
-      const row = await prisma.media.findUnique({ where: { id: Number(id) } });
-      if (!row)
+      mediaRecord = await prisma.media.findUnique({
+        where: { id: Number(id) },
+      });
+      if (!mediaRecord)
         return res.status(404).json({ ok: false, message: "Media not found" });
-      fileName = row.fileName;
+      fileName = mediaRecord.fileName;
+    } else if (fileName) {
+      // Try to find media record by filename for metadata
+      mediaRecord = await prisma.media.findFirst({
+        where: { fileName: fileName.trim() },
+      });
     }
 
     if (!fileName || typeof fileName !== "string" || !fileName.trim()) {
@@ -90,6 +111,19 @@ export async function play(req, res, next) {
     if (length !== undefined) options.length = parseInt(length);
     if (filter !== undefined) options.filter = filter;
 
+    // Add overlay options if media metadata exists
+    if (
+      showOverlay &&
+      mediaRecord &&
+      (mediaRecord.artist || mediaRecord.title || mediaRecord.author)
+    ) {
+      options.showOverlay = true;
+      options.artist = mediaRecord.author || mediaRecord.artist || "";
+      options.title = mediaRecord.title || "";
+      if (overlayLayer)
+        options.overlayLayer = parseIntOrDefault(overlayLayer, 20);
+    }
+
     // Detailed debug logging
     console.log("[CASPAR PLAY REQUEST]", {
       channel: ch,
@@ -97,6 +131,7 @@ export async function play(req, res, next) {
       base,
       options,
       fullCommand: `PLAY ${ch}-${ly} "${base}"`,
+      overlayEnabled: options.showOverlay || false,
     });
 
     const result = await casparPlay(base, ch, ly, options);
@@ -672,6 +707,66 @@ export async function health(req, res, next) {
     });
   } catch (error) {
     console.error("[HEALTH ERROR]", error);
+    next(error);
+  }
+}
+
+// Overlay Controllers
+export async function showOverlay(req, res, next) {
+  try {
+    const { channel, overlayLayer, artist, title, fileName } = req.body || {};
+
+    const ch = parseIntOrDefault(channel, cfg.caspar.channel || 1);
+    const ly = parseIntOrDefault(overlayLayer, 20);
+
+    console.log("[CASPAR SHOW OVERLAY]", {
+      channel: ch,
+      layer: ly,
+      artist,
+      title,
+      fileName,
+    });
+
+    const result = await casparShowOverlay(ch, ly, artist, title, fileName);
+
+    return res.json({
+      ok: result.success,
+      command: "CG ADD",
+      channel: ch,
+      layer: ly,
+      result: result,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("[SHOW OVERLAY ERROR]", error);
+    next(error);
+  }
+}
+
+export async function hideOverlay(req, res, next) {
+  try {
+    const { channel, overlayLayer } = req.body || {};
+
+    const ch = parseIntOrDefault(channel, cfg.caspar.channel || 1);
+    const ly = parseIntOrDefault(overlayLayer, 20);
+
+    console.log("[CASPAR HIDE OVERLAY]", {
+      channel: ch,
+      layer: ly,
+    });
+
+    const result = await casparHideOverlay(ch, ly);
+
+    return res.json({
+      ok: result.success,
+      command: "CG CLEAR",
+      channel: ch,
+      layer: ly,
+      result: result,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("[HIDE OVERLAY ERROR]", error);
     next(error);
   }
 }

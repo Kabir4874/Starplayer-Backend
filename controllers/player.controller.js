@@ -18,6 +18,8 @@ export async function playMedia(req, res, next) {
       layer = 10,
       playOnCaspar = true,
       playInBrowser = true,
+      showOverlay = true,
+      overlayLayer = 20,
     } = req.body;
 
     let media;
@@ -44,7 +46,22 @@ export async function playMedia(req, res, next) {
     let casparResponse = null;
     if (playOnCaspar) {
       try {
-        casparResponse = await casparPlay(targetFileName, channel, layer);
+        const options = {};
+
+        // Add overlay metadata if available and overlay is enabled
+        if (showOverlay && media && (media.author || media.title)) {
+          options.showOverlay = true;
+          options.artist = media.author || "";
+          options.title = media.title || "";
+          options.overlayLayer = overlayLayer;
+        }
+
+        casparResponse = await casparPlay(
+          targetFileName,
+          channel,
+          layer,
+          options
+        );
       } catch (error) {
         console.error("CasparCG play error:", error);
       }

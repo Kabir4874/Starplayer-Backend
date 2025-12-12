@@ -1,5 +1,6 @@
 import net from "net";
 import { cfg } from "../config/config.js";
+import { prisma } from "./prisma.js";
 
 class CasparCGSocket {
   constructor() {
@@ -9,7 +10,6 @@ class CasparCGSocket {
     this.connected = false;
     this.connectPromise = null;
     this.responseCallbacks = new Map();
-    this.requestId = 1;
     this.autoReconnect = true;
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 5;
@@ -17,9 +17,7 @@ class CasparCGSocket {
   }
 
   async connect() {
-    if (this.connectPromise) {
-      return this.connectPromise;
-    }
+    if (this.connectPromise) return this.connectPromise;
 
     this.connectPromise = new Promise((resolve, reject) => {
       this.socket = new net.Socket();
@@ -34,19 +32,14 @@ class CasparCGSocket {
       this.socket.on("data", (data) => {
         const response = data.toString();
         this.responseBuffer += response;
-        console.log("📥 Received raw data:");
 
         // Process complete lines from buffer
         const lines = this.responseBuffer.split("\r\n");
-
-        // Keep the last incomplete line in buffer
         this.responseBuffer = lines.pop() || "";
 
         lines.forEach((line) => {
-          if (line.trim()) {
-            console.log("📥 Processing line:");
-            this.processResponseLine(line.trim());
-          }
+          const trimmed = line.trim();
+          if (trimmed) this.processResponseLine(trimmed);
         });
       });
 
@@ -62,7 +55,6 @@ class CasparCGSocket {
         this.connected = false;
         this.connectPromise = null;
 
-        // Auto-reconnect logic
         if (
           this.autoReconnect &&
           this.reconnectAttempts < this.maxReconnectAttempts
@@ -80,8 +72,6 @@ class CasparCGSocket {
   }
 
   processResponseLine(line) {
-    console.log("🔍 Processing response line:");
-
     // Handle different response formats
     if (line.startsWith("RES")) {
       const parts = line.split(" ");
@@ -89,22 +79,18 @@ class CasparCGSocket {
       const statusCode = parts[2];
       const callback = this.responseCallbacks.get(reqId);
 
-      console.log("🔍 Found RES response:", {
-        reqId,
-        statusCode,
-        hasCallback: !!callback,
-      });
-
       if (callback) {
         const responseObj = {
           requestId: reqId,
-          statusCode: parseInt(statusCode),
+          statusCode: parseInt(statusCode, 10),
           data: parts.slice(3).join(" "),
           raw: line,
-          success: statusCode >= 200 && statusCode < 400,
+          success:
+            Number(statusCode) >= 200 && Number(statusCode) < 400
+              ? true
+              : false,
         };
 
-        // Parse CLS response into structured data
         if (line.includes("CLS") && statusCode === "200") {
           responseObj.mediaList = this.parseMediaList(line);
         }
@@ -112,48 +98,42 @@ class CasparCGSocket {
         callback(responseObj);
         this.responseCallbacks.delete(reqId);
       }
-    } else if (line.startsWith("2")) {
-      console.log("🔍 Found immediate success response:");
+      return;
+    }
+
+    // Immediate responses (some Caspar builds do this)
+    if (line.startsWith("2") || line.startsWith("4") || line.startsWith("5")) {
       this.handleImmediateResponse(line);
-    } else if (line.startsWith("4") || line.startsWith("5")) {
-      // Handle immediate error responses
-      console.log("🔍 Found immediate error response:");
-      this.handleImmediateResponse(line);
-    } else {
-      console.log("🔍 Unknown response format, ignoring:");
     }
   }
 
   handleImmediateResponse(line) {
     const parts = line.split(" ");
-    if (parts.length >= 2) {
-      // Try to find request ID in the response
-      let reqId = null;
+    if (parts.length < 1) return;
 
-      // Look for potential request ID (usually after status code)
-      for (let i = 1; i < parts.length; i++) {
-        if (parts[i] && parts[i].match(/^[a-z0-9]{4,6}$/i)) {
-          reqId = parts[i];
-          break;
-        }
-      }
-
-      if (reqId) {
-        const callback = this.responseCallbacks.get(reqId);
-        if (callback) {
-          const responseObj = {
-            requestId: reqId,
-            statusCode: parseInt(parts[0]),
-            data: parts.slice(1).join(" "),
-            raw: line,
-            success: parts[0].startsWith("2"),
-          };
-          console.log("🔍 Calling callback for immediate response:");
-          callback(responseObj);
-          this.responseCallbacks.delete(reqId);
-        }
+    let reqId = null;
+    for (let i = 1; i < parts.length; i++) {
+      if (parts[i] && parts[i].match(/^[a-z0-9]{4,8}$/i)) {
+        reqId = parts[i];
+        break;
       }
     }
+
+    if (!reqId) return;
+
+    const callback = this.responseCallbacks.get(reqId);
+    if (!callback) return;
+
+    const responseObj = {
+      requestId: reqId,
+      statusCode: parseInt(parts[0], 10),
+      data: parts.slice(1).join(" "),
+      raw: line,
+      success: String(parts[0]).startsWith("2"),
+    };
+
+    callback(responseObj);
+    this.responseCallbacks.delete(reqId);
   }
 
   parseMediaList(response) {
@@ -186,16 +166,13 @@ class CasparCGSocket {
 
   async sendCommand(command, timeoutMs = 2000, expectResponse = true) {
     try {
-      if (!this.connected) {
-        await this.connect();
-      }
+      if (!this.connected) await this.connect();
 
       const reqId = this.generateRequestId();
       const fullCommand = `REQ ${reqId} ${command}\r\n`;
 
       console.log(`📤 Sending: ${fullCommand.trim()}`);
 
-      // For commands that don't need responses, just send and return success
       if (!expectResponse) {
         this.socket.write(fullCommand);
         return {
@@ -208,7 +185,7 @@ class CasparCGSocket {
         };
       }
 
-      return new Promise((resolve, reject) => {
+      return new Promise((resolve) => {
         const timeout = setTimeout(() => {
           this.responseCallbacks.delete(reqId);
           console.log(`⚠️ Command timeout, assuming success: ${command}`);
@@ -224,7 +201,6 @@ class CasparCGSocket {
 
         this.responseCallbacks.set(reqId, (response) => {
           clearTimeout(timeout);
-          console.log("✅ Received response for command:", command);
           resolve(response);
         });
 
@@ -238,21 +214,17 @@ class CasparCGSocket {
 
   async sendFireAndForget(command) {
     try {
-      if (!this.connected) {
-        await this.connect();
-      }
+      if (!this.connected) await this.connect();
 
       const reqId = this.generateRequestId();
       const fullCommand = `REQ ${reqId} ${command}\r\n`;
 
       console.log(`📤 Sending (fire and forget): ${fullCommand.trim()}`);
-
       this.socket.write(fullCommand);
 
-      // Immediately return success for fire-and-forget commands
       return {
         success: true,
-        command: command,
+        command,
         assumed: true,
         timestamp: new Date().toISOString(),
       };
@@ -294,13 +266,152 @@ class CasparCGSocket {
 let casparSocket = null;
 
 function getCasparSocket() {
-  if (!casparSocket) {
-    casparSocket = new CasparCGSocket();
-  }
+  if (!casparSocket) casparSocket = new CasparCGSocket();
   return casparSocket;
 }
 
-// Media Control Functions - Use fire and forget for all control commands
+/**
+ * Helper: escape XML/HTML special characters (for template data)
+ */
+function escapeHtml(text) {
+  const map = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;",
+  };
+  return String(text).replace(/[&<>"']/g, (m) => map[m]);
+}
+
+/**
+ * Helper: escape a string to be safely wrapped inside AMCP quotes "..."
+ * - Escapes backslash and quotes
+ * - Removes CR/LF (Caspar treats lines as terminators)
+ */
+function escapeAmcpQuotedString(s) {
+  return String(s)
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, "")
+    .replace(/\n/g, "");
+}
+
+/**
+ * Aggressive overlay “make it work” implementation:
+ * - Clears prior CG instances (REMOVE/STOP) and layer (CLEAR)
+ * - Tries multiple payload formats (JSON + XML) for CG ADD
+ * - Ensures the layer is visible (MIXER OPACITY 1, FILL sane default)
+ *
+ * Requirements on Caspar side:
+ * - A template named "starplayer_overlay" must exist in your templates/html producer folder,
+ *   and it must accept either JSON data (typical HTML template) or classic templateData XML (Flash/legacy).
+ */
+export async function casparShowOverlay(
+  channel = 1,
+  overlayLayer = 20,
+  artist = "",
+  title = "",
+  fileName = ""
+) {
+  const socket = getCasparSocket();
+
+  try {
+    let artistText = String(artist || "")
+      .replace(/_/g, " ")
+      .trim();
+    let titleText = String(title || "")
+      .replace(/_/g, " ")
+      .trim();
+
+    if (!artistText && !titleText && fileName) {
+      const base = String(fileName).replace(/\.[^.]+$/, "");
+      titleText = base.replace(/_/g, " ").trim();
+    }
+
+    if (!artistText && !titleText) {
+      console.log("[Caspar] No overlay text to display");
+      return { success: false, message: "No text to display" };
+    }
+
+    console.log(`[Caspar] Showing overlay on ${channel}-${overlayLayer}:`, {
+      artist: artistText || "(none)",
+      title: titleText || "(none)",
+    });
+
+    // Clear any existing overlay first
+    try {
+      await socket.sendFireAndForget(`CLEAR ${channel}-${overlayLayer}`);
+    } catch (e) {
+      // ignore
+    }
+
+    // Small delay to ensure clear completes
+    await new Promise(r => setTimeout(r, 100));
+
+    // Add the template - NO QUOTES around template name (tested working!)
+    const addCmd = `CG ${channel}-${overlayLayer} ADD 1 starplayer_overlay 1`;
+    console.log(`[Caspar] Sending: ${addCmd}`);
+    await socket.sendFireAndForget(addCmd);
+
+    // Small delay before update
+    await new Promise(r => setTimeout(r, 100));
+
+    // Update with data - JSON format
+    const data = JSON.stringify({ f0: artistText, f1: titleText });
+    const updateCmd = `CG ${channel}-${overlayLayer} UPDATE 1 "${escapeAmcpQuotedString(data)}"`;
+    console.log(`[Caspar] Sending: ${updateCmd}`);
+    await socket.sendFireAndForget(updateCmd);
+
+    console.log("[Caspar] Overlay shown successfully");
+    return {
+      success: true,
+      command: "CG ADD + UPDATE",
+      layer: overlayLayer,
+      artist: artistText,
+      title: titleText,
+    };
+  } catch (error) {
+    console.error("[Caspar] Error in casparShowOverlay:", error?.message || error);
+    return {
+      success: false,
+      error: error?.message || String(error),
+      command: "OVERLAY",
+      layer: overlayLayer,
+    };
+  }
+}
+
+/**
+ * Remove overlay from CasparCG layer (more robust than CLEAR only)
+ */
+export async function casparHideOverlay(channel = 1, overlayLayer = 20) {
+  const socket = getCasparSocket();
+  console.log(`[Caspar] Hiding overlay on ${channel}-${overlayLayer}`);
+
+  // Try CG remove/stop first, then clear layer
+  const cmds = [
+    `CG ${channel}-${overlayLayer} REMOVE 1`,
+    `CG ${channel}-${overlayLayer} STOP 1`,
+    `CG ${channel}-${overlayLayer} CLEAR`,
+    `CLEAR ${channel}-${overlayLayer}`,
+  ];
+
+  for (const cmd of cmds) {
+    try {
+      await socket.sendFireAndForget(cmd);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  return {
+    success: true,
+    command: "HIDE_OVERLAY",
+    layer: overlayLayer,
+  };
+}
+
 export async function casparPlay(
   fileName,
   channel = 1,
@@ -309,9 +420,7 @@ export async function casparPlay(
 ) {
   const socket = getCasparSocket();
 
-  // Build play command with options
   let command = `PLAY ${channel}-${layer} "${fileName}"`;
-
   if (options.loop) command += " LOOP";
   if (options.auto) command += " AUTO";
   if (options.seek !== undefined) command += ` SEEK ${options.seek}`;
@@ -319,13 +428,72 @@ export async function casparPlay(
   if (options.filter !== undefined) command += ` FILTER ${options.filter}`;
 
   console.log(`[Caspar] Sending play command: ${command}`);
-
-  // Use fire and forget for PLAY commands
   const response = await socket.sendFireAndForget(command);
+
+  const shouldShowOverlay = options.showOverlay !== false;
+
+  if (shouldShowOverlay) {
+    const overlayLayer = Number(options.overlayLayer || 20);
+    let artist = options.artist || "";
+    let title = options.title || "";
+
+    if (!artist && !title) {
+      try {
+        const media = await prisma.media.findFirst({
+          where: { fileName: String(fileName).trim() },
+          select: { author: true, title: true, artist: true },
+        });
+
+        if (media) {
+          artist = media.author || media.artist || "";
+          title = media.title || "";
+          console.log("[Caspar] Fetched metadata for overlay:", {
+            artist,
+            title,
+            fileName,
+          });
+        }
+      } catch (err) {
+        console.warn(
+          `[Caspar] Failed to fetch metadata for ${fileName}:`,
+          err?.message || err
+        );
+      }
+    }
+
+    // Show overlay shortly after PLAY (and retry once)
+    setTimeout(async () => {
+      try {
+        await casparShowOverlay(channel, overlayLayer, artist, title, fileName);
+      } catch (err) {
+        console.warn(
+          `[Caspar] Failed to show overlay for ${fileName}:`,
+          err?.message || err
+        );
+        setTimeout(async () => {
+          try {
+            await casparShowOverlay(
+              channel,
+              overlayLayer,
+              artist,
+              title,
+              fileName
+            );
+          } catch (retryErr) {
+            console.error(
+              `[Caspar] Overlay retry failed for ${fileName}:`,
+              retryErr?.message || retryErr
+            );
+          }
+        }, 500);
+      }
+    }, 150);
+  }
+
   return {
     success: true,
-    response: response,
-    command: command,
+    response,
+    command,
     assumed: true,
   };
 }
@@ -334,60 +502,35 @@ export async function casparPause(channel = 1, layer = 10) {
   const socket = getCasparSocket();
   const command = `PAUSE ${channel}-${layer}`;
   const response = await socket.sendFireAndForget(command);
-  return {
-    success: true,
-    response: response,
-    command: command,
-    assumed: true,
-  };
+  return { success: true, response, command, assumed: true };
 }
 
 export async function casparResume(channel = 1, layer = 10) {
   const socket = getCasparSocket();
   const command = `RESUME ${channel}-${layer}`;
   const response = await socket.sendFireAndForget(command);
-  return {
-    success: true,
-    response: response,
-    command: command,
-    assumed: true,
-  };
+  return { success: true, response, command, assumed: true };
 }
 
 export async function casparStop(channel = 1, layer = 10) {
   const socket = getCasparSocket();
   const command = `STOP ${channel}-${layer}`;
   const response = await socket.sendFireAndForget(command);
-  return {
-    success: true,
-    response: response,
-    command: command,
-    assumed: true,
-  };
+  return { success: true, response, command, assumed: true };
 }
 
 export async function casparClear(channel = 1) {
   const socket = getCasparSocket();
   const command = `CLEAR ${channel}`;
   const response = await socket.sendFireAndForget(command);
-  return {
-    success: true,
-    response: response,
-    command: command,
-    assumed: true,
-  };
+  return { success: true, response, command, assumed: true };
 }
 
 export async function casparClearLayer(channel = 1, layer = 10) {
   const socket = getCasparSocket();
   const command = `CLEAR ${channel}-${layer}`;
   const response = await socket.sendFireAndForget(command);
-  return {
-    success: true,
-    response: response,
-    command: command,
-    assumed: true,
-  };
+  return { success: true, response, command, assumed: true };
 }
 
 // Media Information Functions - These need responses
@@ -397,7 +540,7 @@ export async function casparList() {
   return {
     success: response.success,
     mediaList: response.mediaList || [],
-    response: response,
+    response,
     command: "CLS",
   };
 }
@@ -406,25 +549,17 @@ export async function casparInfo(channel = 1, layer = 10) {
   const socket = getCasparSocket();
   const command = `INFO ${channel}-${layer}`;
   const response = await socket.sendCommand(command, 3000, true);
-  return {
-    success: response.success,
-    response: response,
-    command: command,
-  };
+  return { success: response.success, response, command };
 }
 
 export async function casparInfoTemplate(channel = 1, layer = 10) {
   const socket = getCasparSocket();
   const command = `INFO ${channel}-${layer} TEMPLATE`;
   const response = await socket.sendCommand(command, 3000, true);
-  return {
-    success: response.success,
-    response: response,
-    command: command,
-  };
+  return { success: response.success, response, command };
 }
 
-// Template Control Functions - Use fire and forget
+// Template Control Functions
 export async function casparPlayTemplate(
   templateName,
   channel = 1,
@@ -435,7 +570,6 @@ export async function casparPlayTemplate(
 
   let command = `PLAY ${channel}-${layer} "${templateName}"`;
 
-  // Add template data
   if (Object.keys(data).length > 0) {
     const dataStr = Object.entries(data)
       .map(([key, value]) => `${key}="${value}"`)
@@ -444,12 +578,7 @@ export async function casparPlayTemplate(
   }
 
   const response = await socket.sendFireAndForget(command);
-  return {
-    success: true,
-    response: response,
-    command: command,
-    assumed: true,
-  };
+  return { success: true, response, command, assumed: true };
 }
 
 export async function casparCGUpdate(
@@ -462,7 +591,6 @@ export async function casparCGUpdate(
 
   let command = `CG ${channel}-${layer} UPDATE "${templateName}"`;
 
-  // Add template data
   if (Object.keys(data).length > 0) {
     const dataStr = Object.entries(data)
       .map(([key, value]) => `${key}="${value}"`)
@@ -471,35 +599,21 @@ export async function casparCGUpdate(
   }
 
   const response = await socket.sendFireAndForget(command);
-  return {
-    success: true,
-    response: response,
-    command: command,
-    assumed: true,
-  };
+  return { success: true, response, command, assumed: true };
 }
 
 export async function casparCGStop(templateName, channel = 1, layer = 10) {
   const socket = getCasparSocket();
   const command = `CG ${channel}-${layer} STOP "${templateName}"`;
   const response = await socket.sendFireAndForget(command);
-  return {
-    success: true,
-    response: response,
-    command: command,
-    assumed: true,
-  };
+  return { success: true, response, command, assumed: true };
 }
 
-// Channel Configuration Functions - Use fire and forget
+// Channel Configuration
 export async function casparChannelGrid() {
   const socket = getCasparSocket();
   const response = await socket.sendCommand("CHANNEL_GRID", 3000, true);
-  return {
-    success: response.success,
-    response: response,
-    command: "CHANNEL_GRID",
-  };
+  return { success: response.success, response, command: "CHANNEL_GRID" };
 }
 
 export async function casparSetChannelFormat(
@@ -509,45 +623,27 @@ export async function casparSetChannelFormat(
   const socket = getCasparSocket();
   const command = `SET ${channel} FORMAT ${format}`;
   const response = await socket.sendFireAndForget(command);
-  return {
-    success: true,
-    response: response,
-    command: command,
-    assumed: true,
-  };
+  return { success: true, response, command, assumed: true };
 }
 
-// System Functions - These need responses
+// System Functions
 export async function casparVersion() {
   const socket = getCasparSocket();
   const response = await socket.sendCommand("VERSION", 3000, true);
-  return {
-    success: response.success,
-    response: response,
-    command: "VERSION",
-  };
+  return { success: response.success, response, command: "VERSION" };
 }
 
 export async function casparHelp(command = "") {
   const socket = getCasparSocket();
   const cmd = command ? `HELP ${command}` : "HELP";
   const response = await socket.sendCommand(cmd, 3000, true);
-  return {
-    success: response.success,
-    response: response,
-    command: cmd,
-  };
+  return { success: response.success, response, command: cmd };
 }
 
 export async function casparKill() {
   const socket = getCasparSocket();
   const response = await socket.sendFireAndForget("KILL");
-  return {
-    success: true,
-    response: response,
-    command: "KILL",
-    assumed: true,
-  };
+  return { success: true, response, command: "KILL", assumed: true };
 }
 
 // Diagnostics and Status
@@ -560,7 +656,7 @@ export async function testCasparConnection() {
     return {
       connected: true,
       version: version.response,
-      status: status,
+      status,
       timestamp: new Date().toISOString(),
     };
   } catch (error) {
@@ -615,12 +711,8 @@ export async function casparPlaylist(
     const layer = startLayer + i;
 
     try {
-      // Stop previous item if not first
-      if (i > 0) {
-        await casparStop(channel, startLayer + i - 1);
-      }
+      if (i > 0) await casparStop(channel, startLayer + i - 1);
 
-      // Play current item
       const result = await casparPlay(
         item.fileName,
         channel,
@@ -628,24 +720,18 @@ export async function casparPlaylist(
         item.options || {}
       );
       results.push({
-        item: item,
-        layer: layer,
+        item,
+        layer,
         success: result.success,
         response: result.response,
         assumed: result.assumed || false,
       });
 
-      // Wait before next command if not last item
       if (i < playlist.length - 1) {
         await new Promise((resolve) => setTimeout(resolve, delayBetween));
       }
     } catch (error) {
-      results.push({
-        item: item,
-        layer: layer,
-        success: false,
-        error: error.message,
-      });
+      results.push({ item, layer, success: false, error: error.message });
     }
   }
 
@@ -669,19 +755,12 @@ process.on("SIGTERM", async () => {
   process.exit(0);
 });
 
-// Add to existing exports
+// Quick play
 export async function casparQuickPlay(fileName, channel = 1, layer = 10) {
   const socket = getCasparSocket();
   const command = `PLAY ${channel}-${layer} "${fileName}"`;
-
-  // Use fire and forget for quick responses
   const response = await socket.sendFireAndForget(command);
-  return {
-    success: true,
-    response: response,
-    command: command,
-    assumed: true,
-  };
+  return { success: true, response, command, assumed: true };
 }
 
 export default {
@@ -692,6 +771,10 @@ export default {
   casparStop,
   casparClear,
   casparClearLayer,
+
+  // Overlay
+  casparShowOverlay,
+  casparHideOverlay,
 
   // Media Information
   casparList,

@@ -1,4 +1,3 @@
-// src/routes/caspar.routes.js
 import { Router } from "express";
 import multer from "multer";
 import {
@@ -10,6 +9,7 @@ import {
   diagnostics,
   health,
   help,
+  hideOverlay,
   info,
   infoTemplate,
   kill,
@@ -20,6 +20,7 @@ import {
   playTemplate,
   resume,
   setChannelFormat,
+  showOverlay,
   status,
   stop,
   testConnection,
@@ -62,6 +63,10 @@ router.post("/clear/layer", parseFieldsOnly, clearLayer);
 router.post("/template/play", parseFieldsOnly, playTemplate);
 router.post("/template/update", parseFieldsOnly, cgUpdate);
 router.post("/template/stop", parseFieldsOnly, cgStop);
+
+// Overlay Control
+router.post("/overlay/show", parseFieldsOnly, showOverlay);
+router.post("/overlay/hide", parseFieldsOnly, hideOverlay);
 
 // Channel Configuration
 router.get("/channel/grid", channelGrid);
