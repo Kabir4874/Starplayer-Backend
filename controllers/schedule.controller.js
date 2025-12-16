@@ -1,5 +1,9 @@
 // src/controllers/schedule.controller.js
 import { prisma } from "../services/prisma.js";
+import {
+  getSchedulerStatus,
+  stopCurrentSchedule,
+} from "../services/scheduler.js";
 
 /* ───────────────────────── Helpers ───────────────────────── */
 
@@ -213,9 +217,19 @@ export async function deleteSchedule(req, res, next) {
       });
     }
 
-    await prisma.schedule.delete({
-      where: { id },
-    });
+    // Check if this schedule is currently running
+    const status = getSchedulerStatus();
+    const isCurrentlyRunning = status.runningJob?.scheduleId === id;
+
+    if (isCurrentlyRunning) {
+      // Stop the scheduler - this will clean up internal state and delete from DB
+      await stopCurrentSchedule();
+    } else {
+      // Not currently running, just delete from DB
+      await prisma.schedule.delete({
+        where: { id },
+      });
+    }
 
     res.json({
       ok: true,

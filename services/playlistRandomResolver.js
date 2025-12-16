@@ -3,21 +3,50 @@ import { prisma } from "./prisma.js";
 
 /**
  * Pick a random Media of given MediaType (SONG/JINGLE/SPOT),
- * optionally excluding some mediaIds (already used in this playlist instance).
+ * excluding already used mediaIds (no reuse within single playlist).
+ * If the requested type is not available, falls back to other types.
  */
 async function pickRandomMediaByType(type, excludeIds = []) {
-  const where = {
-    type,
-    ...(excludeIds.length ? { NOT: { id: { in: excludeIds } } } : {}),
-  };
+  const allTypes = ["SONG", "JINGLE", "SPOT"];
+
+  // Try requested type first, then fallback to other types
+  const typesToTry = [type, ...allTypes.filter((t) => t !== type)];
+
+  for (const currentType of typesToTry) {
+    // Try to find a unique item (not in excludeIds)
+    const where = {
+      type: currentType,
+      ...(excludeIds.length ? { NOT: { id: { in: excludeIds } } } : {}),
+    };
+
+    const total = await prisma.media.count({ where });
+
+    // If we found items of this type, pick one
+    if (total > 0) {
+      const skip = Math.floor(Math.random() * total);
+      const [result] = await prisma.media.findMany({
+        where,
+        orderBy: { id: "asc" }, // deterministic ordering + random skip
+        skip,
+        take: 1,
+      });
+
+      if (result) return result;
+    }
+  }
+
+  // If still no results with type-specific search, try any media type (still excluding used)
+  const where =
+    excludeIds.length > 0 ? { NOT: { id: { in: excludeIds } } } : {};
 
   const total = await prisma.media.count({ where });
-  if (!total) return null;
+
+  if (!total) return null; // No unique songs left, skip this slot
 
   const skip = Math.floor(Math.random() * total);
   const [result] = await prisma.media.findMany({
     where,
-    orderBy: { id: "asc" }, // deterministic ordering + random skip
+    orderBy: { id: "asc" },
     skip,
     take: 1,
   });
@@ -99,19 +128,4 @@ export async function resolvePlaylistForSchedule(playlistId) {
   }
 
   return resolved;
-}
-
-/**
- * Helper to resolve just *one* RANDOM slot (if you ever need it separately).
- */
-export async function resolveSingleRandomSlot(
-  randomType,
-  excludeMediaIds = []
-) {
-  const type = (randomType || "SONG").toUpperCase();
-  if (!["SONG", "JINGLE", "SPOT"].includes(type)) {
-    throw new Error(`Invalid randomType: ${randomType}`);
-  }
-  const media = await pickRandomMediaByType(type, excludeMediaIds);
-  return media;
 }

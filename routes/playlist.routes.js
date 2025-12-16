@@ -6,6 +6,7 @@ import {
   getPlaylist,
   listPlaylists,
   removePlaylistItem,
+  resolvePlaylist,
   updatePlaylist,
 } from "../controllers/playlist.controller.js";
 
@@ -13,6 +14,7 @@ const router = Router();
 
 router.get("/", listPlaylists);
 router.get("/:id", getPlaylist);
+router.get("/:id/resolve", resolvePlaylist);
 router.post("/", createPlaylist);
 router.put("/:id", updatePlaylist);
 router.delete("/:id", deletePlaylist);

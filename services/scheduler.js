@@ -499,15 +499,27 @@ async function processScheduleQueue() {
     }
   } finally {
     // After processing (or force abort), clear queue state
+    console.log(
+      "[Scheduler] processScheduleQueue finally block - cleaning up queue state"
+    );
     _isProcessingQueue = false;
     _scheduleQueue = [];
-    _forceAbortAll = false;
+    // Only reset _forceAbortAll if it wasn't externally set
+    if (_forceAbortAll) {
+      console.log(
+        "[Scheduler] _forceAbortAll was true, keeping flags for stopCurrentSchedule to handle"
+      );
+    } else {
+      _forceAbortAll = false;
+    }
   }
 }
 
 async function tick() {
   if (_runningJob || _isProcessingQueue) {
-    console.log(`[Scheduler] Tick skipped - job running or queue processing`);
+    console.log(
+      `[Scheduler] Tick skipped - job running: ${!!_runningJob}, queue processing: ${_isProcessingQueue}`
+    );
     return;
   }
 
@@ -518,7 +530,9 @@ async function tick() {
 
   console.log(
     `[Scheduler] Found ${dueSchedules.length} due schedules:`,
-    dueSchedules
+    dueSchedules,
+    `claimed:`,
+    Array.from(_claimed)
   );
 
   const newSchedules = dueSchedules.filter(
@@ -694,6 +708,9 @@ export async function stopCurrentSchedule() {
     _scheduleQueue = _scheduleQueue.filter((s) => s.id !== scheduleId);
   }
 
+  // Wait a bit for the runPlaylist to detect the abort flags and finish
+  await sleep(1000); // Increased from 500ms to 1000ms
+
   emitEvent("schedule_stopped", {
     scheduleId,
     playlistId,
@@ -715,6 +732,18 @@ export async function stopCurrentSchedule() {
 
   // Mark queue processing as done from the scheduler's POV
   _isProcessingQueue = false;
+  _scheduleQueue = [];
+
+  // Reset all control flags to ensure clean state
+  _cancelRequested = false;
+  _forceAbortAll = false;
+  _paused = false;
+  _skipRequested = false;
+
+  // Clear the claimed set completely
+  _claimed.clear();
+
+  console.log("[Scheduler] stopCurrentSchedule: ALL state forcefully cleared");
 
   return {
     cancelled: true,

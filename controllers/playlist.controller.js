@@ -638,3 +638,54 @@ export async function removePlaylistItem(req, res, next) {
     next(error);
   }
 }
+
+/**
+ * GET /api/playlists/:id/resolve
+ * Resolve a playlist with RANDOM slots filled in with actual media items.
+ * Each call generates fresh random picks.
+ */
+export async function resolvePlaylist(req, res, next) {
+  try {
+    const playlistId = parseInt(req.params.id, 10);
+    if (!playlistId || Number.isNaN(playlistId)) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid playlist ID",
+      });
+    }
+
+    // Import the resolver
+    const { resolvePlaylistForSchedule } = await import(
+      "../services/playlistRandomResolver.js"
+    );
+
+    const resolved = await resolvePlaylistForSchedule(playlistId);
+
+    // Convert to client-friendly format
+    // Since items are now resolved, treat them all as actual media
+    // (don't mark as random since they've been resolved to real songs)
+    const items = resolved.map((item, index) => ({
+      id: item.media.id,
+      order: index,
+      type: item.media.type,
+      author: item.media.author,
+      title: item.media.title,
+      year: item.media.year,
+      fileName: item.media.fileName,
+      duration: item.media.duration,
+      language: item.media.language,
+      bpm: item.media.bpm,
+      // Optional: include original kind for tracking purposes if needed
+      // But don't include isRandom flag since these are resolved items
+      wasRandomSlot: item.kind === "RANDOM", // Track if this was originally a random slot
+    }));
+
+    res.json({
+      ok: true,
+      playlistId,
+      items,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
