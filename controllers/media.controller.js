@@ -413,6 +413,7 @@ export async function streamMedia(req, res, next) {
         "Accept-Ranges": "bytes",
         "Content-Length": chunksize,
         "Content-Type": contentType,
+        "Access-Control-Allow-Origin": "*",
       };
 
       res.writeHead(206, head);
@@ -422,6 +423,7 @@ export async function streamMedia(req, res, next) {
         "Content-Length": fileSize,
         "Content-Type": contentType,
         "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Origin": "*",
       };
       res.writeHead(200, head);
       fse.createReadStream(filePath).pipe(res);

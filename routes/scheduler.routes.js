@@ -2,6 +2,7 @@
 import { Router } from "express";
 import {
   getCurrentPlayingMedia,
+  getCurrentSchedulePlaylist,
   getSchedulerStatus,
   onSchedulerEvent,
 } from "../services/scheduler.js";
@@ -34,9 +35,11 @@ router.get("/status", (req, res) => {
 router.get("/current-media", (req, res) => {
   try {
     const currentMedia = getCurrentPlayingMedia();
+    const currentPlaylist = getCurrentSchedulePlaylist();
     res.json({
       ok: true,
       currentMedia,
+      currentPlaylist,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {

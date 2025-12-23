@@ -111,15 +111,13 @@ export async function play(req, res, next) {
     if (length !== undefined) options.length = parseInt(length);
     if (filter !== undefined) options.filter = filter;
 
-    // Add overlay options if media metadata exists
-    if (
-      showOverlay &&
-      mediaRecord &&
-      (mediaRecord.artist || mediaRecord.title || mediaRecord.author)
-    ) {
+    // Overlay options (always allow, metadata optional; fallback uses filename)
+    if (showOverlay) {
       options.showOverlay = true;
-      options.artist = mediaRecord.author || mediaRecord.artist || "";
-      options.title = mediaRecord.title || "";
+      if (mediaRecord) {
+        options.artist = mediaRecord.author || mediaRecord.artist || "";
+        options.title = mediaRecord.title || "";
+      }
       if (overlayLayer)
         options.overlayLayer = parseIntOrDefault(overlayLayer, 20);
     }

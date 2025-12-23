@@ -20,6 +20,7 @@ let _runningJob = null;
 // Store current playing media for frontend
 let _currentPlayingMedia = null;
 let _currentMediaStartTime = null;
+let _currentSchedulePlaylist = null;
 
 // Event emitter for frontend updates
 const _eventCallbacks = new Set();
@@ -113,21 +114,64 @@ async function getDueSchedules() {
  *   }
  */
 async function getPlaylistQueue(playlistId) {
-  const resolved = await resolvePlaylistForSchedule(Number(playlistId));
+  const playlist = await prisma.playlist.findUnique({
+    where: { id: Number(playlistId) },
+    include: {
+      playlistItems: {
+        include: { media: true },
+        orderBy: { order: "asc" },
+      },
+    },
+  });
 
-  const queue = resolved
-    .map((r) => {
-      if (!r.media || !r.media.fileName) return null;
+  const items = playlist?.playlistItems || [];
+  let queue = items
+    .map((item) => {
+      if (!item.media || !item.media.fileName) return null;
       return {
-        ...r.media,
-        playlistItemId: r.playlistItemId,
-        playlistItemKind: r.kind,
-        randomType: r.randomType || null,
+        ...item.media,
+        playlistItemId: item.id,
+        playlistItemKind: item.kind || "FIXED",
+        randomType: null,
       };
     })
     .filter(Boolean);
 
-  return queue;
+  // If there are no fixed media items (e.g., only RANDOM slots),
+  // resolve once so schedule can still play a concrete list.
+  if (!queue.length) {
+    const resolved = await resolvePlaylistForSchedule(Number(playlistId));
+    queue = resolved
+      .map((r) => {
+        if (!r.media || !r.media.fileName) return null;
+        return {
+          ...r.media,
+          playlistItemId: r.playlistItemId,
+          playlistItemKind: r.kind,
+          randomType: r.randomType || null,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  const displayItems = queue.map((m, index) => ({
+    id: m.id,
+    order: index,
+    type: m.type,
+    author: m.author,
+    title: m.title,
+    year: m.year,
+    fileName: m.fileName,
+    duration: m.duration,
+    language: m.language,
+    bpm: m.bpm,
+  }));
+
+  return {
+    queue,
+    displayItems,
+    playlistTitle: playlist?.title || `PL${playlistId}`,
+  };
 }
 
 async function logHistory(mediaId) {
@@ -172,7 +216,12 @@ async function playMediaAndWait(media, scheduleId, index, total) {
   });
 
   try {
-    await casparPlay(fileName, CHANNEL, LAYER);
+    await casparPlay(fileName, CHANNEL, LAYER, {
+      showOverlay: true,
+      overlayLayer: 20,
+      artist: media.author || media.artist || "",
+      title: media.title || "",
+    });
     console.log(`[Scheduler] Successfully sent play command for: ${fileName}`);
   } catch (error) {
     console.error(`[Scheduler] Failed to play ${fileName}:`, error.message);
@@ -265,10 +314,13 @@ async function runPlaylist(playlistId, scheduleId) {
     timestamp: new Date(),
   });
 
-  const queue = await getPlaylistQueue(playlistId);
+  const { queue, displayItems, playlistTitle } = await getPlaylistQueue(
+    playlistId
+  );
   console.log(`[Scheduler] Playlist queue length: ${queue.length}`);
 
   if (!queue.length) {
+    _currentSchedulePlaylist = null;
     console.log(
       `[Scheduler] Schedule #${scheduleId}: playlist ${playlistId} has no items; removing schedule.`
     );
@@ -297,6 +349,13 @@ async function runPlaylist(playlistId, scheduleId) {
     _claimed.delete(scheduleId);
     return;
   }
+
+  _currentSchedulePlaylist = {
+    scheduleId,
+    playlistId,
+    title: playlistTitle,
+    items: displayItems,
+  };
 
   console.log(
     `[Scheduler] Starting playlist ${playlistId} for schedule #${scheduleId}...`
@@ -450,6 +509,7 @@ async function runPlaylist(playlistId, scheduleId) {
   _runningJob = null;
   _currentPlayingMedia = null;
   _currentMediaStartTime = null;
+  _currentSchedulePlaylist = null;
 }
 
 async function processScheduleQueue() {
@@ -574,6 +634,7 @@ export function stopScheduleRunner() {
   _started = false;
   _currentPlayingMedia = null;
   _currentMediaStartTime = null;
+  _currentSchedulePlaylist = null;
   _scheduleQueue = [];
   _isProcessingQueue = false;
   _claimed.clear();
@@ -590,6 +651,7 @@ export function getSchedulerStatus() {
     started: _started,
     runningJob: _runningJob,
     currentPlayingMedia: _currentPlayingMedia,
+    currentSchedulePlaylist: _currentSchedulePlaylist,
     claimed: Array.from(_claimed),
     scheduleQueue: _scheduleQueue,
     isProcessingQueue: _isProcessingQueue,
@@ -597,6 +659,10 @@ export function getSchedulerStatus() {
     paused: _paused,
     cancelRequested: _cancelRequested,
   };
+}
+
+export function getCurrentSchedulePlaylist() {
+  return _currentSchedulePlaylist;
 }
 
 export async function pauseCurrentSchedule() {
@@ -729,6 +795,7 @@ export async function stopCurrentSchedule() {
   _runningJob = null;
   _currentPlayingMedia = null;
   _currentMediaStartTime = null;
+  _currentSchedulePlaylist = null;
 
   // Mark queue processing as done from the scheduler's POV
   _isProcessingQueue = false;

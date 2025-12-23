@@ -48,11 +48,13 @@ export async function playMedia(req, res, next) {
       try {
         const options = {};
 
-        // Add overlay metadata if available and overlay is enabled
-        if (showOverlay && media && (media.author || media.title)) {
+        // Overlay options (always allow, metadata optional; fallback uses filename)
+        if (showOverlay) {
           options.showOverlay = true;
-          options.artist = media.author || "";
-          options.title = media.title || "";
+          if (media) {
+            options.artist = media.author || "";
+            options.title = media.title || "";
+          }
           options.overlayLayer = overlayLayer;
         }
 

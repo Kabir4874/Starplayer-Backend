@@ -430,6 +430,14 @@ export async function casparPlay(
   console.log(`[Caspar] Sending play command: ${command}`);
   const response = await socket.sendFireAndForget(command);
 
+  // Ensure audio is unmuted at both layer and channel level
+  try {
+    await socket.sendFireAndForget(`MIXER ${channel}-${layer} VOLUME 1`);
+    await socket.sendFireAndForget(`MIXER ${channel} MASTERVOLUME 1`);
+  } catch (e) {
+    console.warn("[Caspar] Failed to set mixer volume:", e?.message || e);
+  }
+
   const shouldShowOverlay = options.showOverlay !== false;
 
   if (shouldShowOverlay) {

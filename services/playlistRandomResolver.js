@@ -4,40 +4,13 @@ import { prisma } from "./prisma.js";
 /**
  * Pick a random Media of given MediaType (SONG/JINGLE/SPOT),
  * excluding already used mediaIds (no reuse within single playlist).
- * If the requested type is not available, falls back to other types.
+ * No fallback to other types.
  */
 async function pickRandomMediaByType(type, excludeIds = []) {
-  const allTypes = ["SONG", "JINGLE", "SPOT"];
-
-  // Try requested type first, then fallback to other types
-  const typesToTry = [type, ...allTypes.filter((t) => t !== type)];
-
-  for (const currentType of typesToTry) {
-    // Try to find a unique item (not in excludeIds)
-    const where = {
-      type: currentType,
-      ...(excludeIds.length ? { NOT: { id: { in: excludeIds } } } : {}),
-    };
-
-    const total = await prisma.media.count({ where });
-
-    // If we found items of this type, pick one
-    if (total > 0) {
-      const skip = Math.floor(Math.random() * total);
-      const [result] = await prisma.media.findMany({
-        where,
-        orderBy: { id: "asc" }, // deterministic ordering + random skip
-        skip,
-        take: 1,
-      });
-
-      if (result) return result;
-    }
-  }
-
-  // If still no results with type-specific search, try any media type (still excluding used)
   const where =
-    excludeIds.length > 0 ? { NOT: { id: { in: excludeIds } } } : {};
+    excludeIds.length > 0
+      ? { type, NOT: { id: { in: excludeIds } } }
+      : { type };
 
   const total = await prisma.media.count({ where });
 
@@ -85,12 +58,16 @@ export async function resolvePlaylistForSchedule(playlistId) {
     throw new Error(`Playlist not found for id=${playlistId}`);
   }
 
-  const usedMediaIds = new Set();
+  const usedMediaIds = new Set(
+    (playlist.playlistItems || [])
+      .filter((item) => item.mediaId)
+      .map((item) => item.mediaId)
+  );
   const resolved = [];
 
   for (const item of playlist.playlistItems) {
     if (item.kind === "RANDOM" || (!item.media && item.randomType)) {
-      const randomType = item.randomType || "SONG";
+      const randomType = "SONG";
 
       const media = await pickRandomMediaByType(
         randomType,

@@ -62,6 +62,7 @@ function isNoiseToken(token) {
     "official",
     "video",
     "audio",
+    "oficial",
     "lyrics",
     "lyric",
     "version",
@@ -85,9 +86,19 @@ function cleanTitleLikeString(str) {
   r = r.replace(/\[[^\]]*\]/g, "");
   r = r.replace(/\([^)]*\)/g, "");
 
+  // Remove trailing pipe segments that are just noise (e.g. "| Video Oficial")
+  r = r.replace(
+    /\|\s*(official|oficial)?\s*(video|audio|lyrics?|version)?\b.*$/gi,
+    ""
+  );
+
   // Remove common noise words
   r = r.replace(
-    /\b(official\s*(video|audio|lyrics?|version)|lyric\s*video|music\s*video|full\s*video|audio\s*only)\b/gi,
+    /\b(official|oficial)\s*(video|audio|lyrics?|version)\b/gi,
+    ""
+  );
+  r = r.replace(
+    /\b(lyric\s*video|music\s*video|full\s*video|audio\s*only|video\s*oficial)\b/gi,
     ""
   );
 
@@ -97,6 +108,11 @@ function cleanTitleLikeString(str) {
   // Collapse spaces
   r = r.replace(/\s+/g, " ").trim();
   return r;
+}
+
+function stripTrackNumberPrefix(value) {
+  if (!value) return value;
+  return String(value).replace(/^\s*\d+\s*[\.\-:]\s*/g, "").trim();
 }
 
 /**
@@ -142,6 +158,19 @@ function parseFileName(filename) {
     ) {
       author = potentialAuthor;
       title = potentialTitle;
+    }
+  }
+
+  // Swap "Title - Artist" when left starts with a track number
+  if (author && title && /^\s*\d+\s*[\.\-:]\s*/.test(author)) {
+    const leftClean = cleanTitleLikeString(author);
+    const rightClean = cleanTitleLikeString(title);
+    const leftNoTrack = stripTrackNumberPrefix(leftClean);
+    const rightNoTrack = stripTrackNumberPrefix(rightClean);
+
+    if (rightNoTrack && !isNoiseToken(rightNoTrack.split(/\s+/)[0])) {
+      author = rightNoTrack;
+      title = leftNoTrack || leftClean || author;
     }
   }
 
@@ -192,7 +221,7 @@ function parseFileName(filename) {
   }
 
   // Clean up the results
-  title = cleanTitleLikeString(title || baseName);
+  title = cleanTitleLikeString(stripTrackNumberPrefix(title) || baseName);
   if (!title) {
     title = cleanTitleLikeString(baseName) || baseName;
   }
