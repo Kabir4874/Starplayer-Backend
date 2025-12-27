@@ -114,45 +114,23 @@ async function getDueSchedules() {
  *   }
  */
 async function getPlaylistQueue(playlistId) {
-  const playlist = await prisma.playlist.findUnique({
-    where: { id: Number(playlistId) },
-    include: {
-      playlistItems: {
-        include: { media: true },
-        orderBy: { order: "asc" },
-      },
-    },
-  });
-
-  const items = playlist?.playlistItems || [];
-  let queue = items
-    .map((item) => {
-      if (!item.media || !item.media.fileName) return null;
+  const resolved = await resolvePlaylistForSchedule(Number(playlistId));
+  const queue = resolved
+    .map((r) => {
+      if (!r.media || !r.media.fileName) return null;
       return {
-        ...item.media,
-        playlistItemId: item.id,
-        playlistItemKind: item.kind || "FIXED",
-        randomType: null,
+        ...r.media,
+        playlistItemId: r.playlistItemId,
+        playlistItemKind: r.kind,
+        randomType: r.randomType || null,
       };
     })
     .filter(Boolean);
 
-  // If there are no fixed media items (e.g., only RANDOM slots),
-  // resolve once so schedule can still play a concrete list.
-  if (!queue.length) {
-    const resolved = await resolvePlaylistForSchedule(Number(playlistId));
-    queue = resolved
-      .map((r) => {
-        if (!r.media || !r.media.fileName) return null;
-        return {
-          ...r.media,
-          playlistItemId: r.playlistItemId,
-          playlistItemKind: r.kind,
-          randomType: r.randomType || null,
-        };
-      })
-      .filter(Boolean);
-  }
+  const playlist = await prisma.playlist.findUnique({
+    where: { id: Number(playlistId) },
+    select: { id: true, title: true },
+  });
 
   const displayItems = queue.map((m, index) => ({
     id: m.id,
