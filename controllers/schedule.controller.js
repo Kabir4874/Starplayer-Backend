@@ -246,11 +246,13 @@ export async function deleteSchedule(req, res, next) {
 export async function getUpcomingSchedules(req, res, next) {
   try {
     const now = new Date();
+    const status = getSchedulerStatus();
+    const runningScheduleId =
+      status.runningJob?.scheduleId ??
+      status.currentSchedulePlaylist?.scheduleId ??
+      null;
 
     const schedules = await prisma.schedule.findMany({
-      where: {
-        datetime: { gte: now },
-      },
       include: {
         playlist: {
           include: {
@@ -267,7 +269,31 @@ export async function getUpcomingSchedules(req, res, next) {
       take: 10,
     });
 
-    const transformed = schedules.map((schedule) => ({
+    let runningSchedule = null;
+    if (runningScheduleId != null) {
+      runningSchedule = await prisma.schedule.findUnique({
+        where: { id: runningScheduleId },
+        include: {
+          playlist: {
+            include: {
+              playlistItems: {
+                include: { media: true },
+                orderBy: { order: "asc" },
+              },
+            },
+          },
+        },
+      });
+    }
+
+    const merged = runningSchedule
+      ? [
+          runningSchedule,
+          ...schedules.filter((s) => s.id !== runningSchedule.id),
+        ]
+      : schedules;
+
+    const transformed = merged.map((schedule) => ({
       id: schedule.id,
       playlistId: schedule.playlistId,
       datetime: schedule.datetime,

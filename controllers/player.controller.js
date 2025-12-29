@@ -54,6 +54,7 @@ export async function playMedia(req, res, next) {
           if (media) {
             options.artist = media.author || "";
             options.title = media.title || "";
+            options.mediaType = media.type;
           }
           options.overlayLayer = overlayLayer;
         }
@@ -192,7 +193,13 @@ export async function playPlaylist(req, res, next) {
 
     // Play first item immediately
     const firstItem = playlist.playlistItems[0];
-    await casparPlay(firstItem.media.fileName, channel, startLayer);
+    await casparPlay(firstItem.media.fileName, channel, startLayer, {
+      showOverlay: true,
+      overlayLayer: 20,
+      artist: firstItem.media.author || "",
+      title: firstItem.media.title || "",
+      mediaType: firstItem.media.type || null,
+    });
 
     // Add first item to history
     await prisma.history.create({
@@ -259,7 +266,27 @@ export async function quickPlay(req, res, next) {
       });
     }
 
-    const casparResponse = await casparPlay(fileName, channel, layer);
+    let mediaType = null;
+    try {
+      const media = await prisma.media.findFirst({
+        where: {
+          fileName: {
+            equals: String(fileName).trim(),
+            mode: "insensitive",
+          },
+        },
+        select: { type: true },
+      });
+      mediaType = media?.type || null;
+    } catch (e) {
+      // ignore lookup errors for quick play
+    }
+
+    const casparResponse = await casparPlay(fileName, channel, layer, {
+      showOverlay: true,
+      overlayLayer: 20,
+      mediaType,
+    });
 
     res.json({
       ok: true,

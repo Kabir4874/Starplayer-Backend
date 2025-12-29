@@ -117,6 +117,7 @@ export async function play(req, res, next) {
       if (mediaRecord) {
         options.artist = mediaRecord.author || mediaRecord.artist || "";
         options.title = mediaRecord.title || "";
+        options.mediaType = mediaRecord.type || null;
       }
       if (overlayLayer)
         options.overlayLayer = parseIntOrDefault(overlayLayer, 20);

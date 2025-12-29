@@ -199,6 +199,7 @@ async function playMediaAndWait(media, scheduleId, index, total) {
       overlayLayer: 20,
       artist: media.author || media.artist || "",
       title: media.title || "",
+      mediaType: media.type || null,
     });
     console.log(`[Scheduler] Successfully sent play command for: ${fileName}`);
   } catch (error) {
@@ -554,15 +555,43 @@ async function processScheduleQueue() {
 }
 
 async function tick() {
-  if (_runningJob || _isProcessingQueue) {
-    console.log(
-      `[Scheduler] Tick skipped - job running: ${!!_runningJob}, queue processing: ${_isProcessingQueue}`
-    );
+  const dueSchedules = await getDueSchedules();
+  if (!dueSchedules.length) {
     return;
   }
 
-  const dueSchedules = await getDueSchedules();
-  if (!dueSchedules.length) {
+  if (_runningJob || _isProcessingQueue) {
+    const runningScheduleId = _runningJob?.scheduleId ?? null;
+    const preemptSchedules = dueSchedules.filter(
+      (schedule) =>
+        !_claimed.has(schedule.id) && schedule.id !== runningScheduleId
+    );
+
+    if (!preemptSchedules.length) {
+      console.log(
+        `[Scheduler] Tick skipped - job running: ${!!_runningJob}, queue processing: ${_isProcessingQueue}`
+      );
+      return;
+    }
+
+    console.log(
+      "[Scheduler] New due schedule(s) detected during playback; preempting current schedule."
+    );
+    await stopCurrentSchedule();
+
+    const refreshedDue = await getDueSchedules();
+    const refreshedNew = refreshedDue.filter(
+      (schedule) => !_claimed.has(schedule.id)
+    );
+
+    if (!refreshedNew.length) {
+      return;
+    }
+
+    _scheduleQueue.push(...refreshedNew);
+    processScheduleQueue().catch((e) =>
+      console.error("[Scheduler] Queue processing error:", e?.message || e)
+    );
     return;
   }
 
@@ -706,7 +735,11 @@ export async function stopCurrentSchedule() {
     return false;
   }
 
-  const scheduleId = _runningJob?.scheduleId ?? null;
+  const scheduleId =
+    _runningJob?.scheduleId ??
+    _currentSchedulePlaylist?.scheduleId ??
+    _currentPlayingMedia?.scheduleId ??
+    null;
   const playlistId = _runningJob?.playlistId ?? null;
   const mediaId = _runningJob?.mediaId ?? null;
 

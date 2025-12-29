@@ -438,17 +438,65 @@ export async function casparPlay(
     console.warn("[Caspar] Failed to set mixer volume:", e?.message || e);
   }
 
-  const shouldShowOverlay = options.showOverlay !== false;
+  let shouldShowOverlay = options.showOverlay !== false;
+  let mediaType = null;
+
+  if (options.mediaType) {
+    mediaType = options.mediaType;
+  } else {
+    try {
+      const trimmedName = String(fileName).trim();
+      let media = await prisma.media.findFirst({
+        where: {
+          fileName: {
+            equals: trimmedName,
+            mode: "insensitive",
+          },
+        },
+        select: { type: true },
+      });
+      if (!media) {
+        media = await prisma.media.findFirst({
+          where: {
+            fileName: {
+              startsWith: `${trimmedName}.`,
+              mode: "insensitive",
+            },
+          },
+          select: { type: true },
+        });
+      }
+      mediaType = media?.type || null;
+    } catch (err) {
+      console.warn(
+        `[Caspar] Failed to fetch media type for ${fileName}:`,
+        err?.message || err
+      );
+    }
+  }
+
+  const normalizedType = String(mediaType || "").toUpperCase();
+  if (normalizedType === "JINGLE") {
+    shouldShowOverlay = false;
+  }
 
   if (shouldShowOverlay) {
     const overlayLayer = Number(options.overlayLayer || 20);
     let artist = options.artist || "";
     let title = options.title || "";
 
-    if (!artist && !title) {
+    if (normalizedType === "SPOT") {
+      artist = "Pubblicità";
+      title = "";
+    } else if (!artist && !title) {
       try {
         const media = await prisma.media.findFirst({
-          where: { fileName: String(fileName).trim() },
+          where: {
+            fileName: {
+              equals: String(fileName).trim(),
+              mode: "insensitive",
+            },
+          },
           select: { author: true, title: true, artist: true },
         });
 
@@ -496,6 +544,16 @@ export async function casparPlay(
         }, 500);
       }
     }, 150);
+  } else if (normalizedType === "JINGLE") {
+    try {
+      const overlayLayer = Number(options.overlayLayer || 20);
+      await casparHideOverlay(channel, overlayLayer);
+    } catch (err) {
+      console.warn(
+        `[Caspar] Failed to hide overlay for ${fileName}:`,
+        err?.message || err
+      );
+    }
   }
 
   return {
